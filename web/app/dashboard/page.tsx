@@ -44,6 +44,7 @@ interface AppState {
   >
   market_open: boolean
   scheduler_status: { last_premarket: string | null; last_eod: string | null }
+  upcoming_jobs: Array<{ id: string; next_run: string }>
   token_usage: TokenUsage
 }
 
@@ -164,8 +165,47 @@ export default function DashboardPage() {
               {state.token_usage && <TokenUsageCard usage={state.token_usage} />}
             </div>
           </div>
-          <div className="col-span-2">
+          <div className="col-span-2 space-y-4">
             <ActivityFeed />
+            {state.upcoming_jobs.length > 0 && (
+              <div className="bg-surface rounded-lg border border-border p-4">
+                <h3 className="text-sm font-medium text-text-muted uppercase tracking-wider mb-3">
+                  Upcoming Schedule
+                </h3>
+                <div className="space-y-1">
+                  {state.upcoming_jobs.map((job) => {
+                    const t = new Date(job.next_run)
+                    const timeStr = t.toLocaleTimeString("en-IN", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      timeZone: "Asia/Kolkata",
+                      hour12: false,
+                    })
+                    const dateStr = t.toLocaleDateString("en-IN", {
+                      day: "numeric",
+                      month: "short",
+                      timeZone: "Asia/Kolkata",
+                    })
+                    const isToday = new Date().toDateString() === t.toDateString()
+                    const labels: Record<string, string> = {
+                      premarket: "Pre-market screening",
+                      execution: "Execution planning",
+                      heartbeat: "Heartbeat",
+                      clear_proposals: "Clear proposals",
+                      eod: "EOD report",
+                    }
+                    return (
+                      <div key={job.id} className="flex items-center justify-between text-xs py-1.5 border-b border-border/50 last:border-0">
+                        <span className="font-mono text-accent-amber">{labels[job.id] ?? job.id}</span>
+                        <span className="text-text-muted font-mono">
+                          {isToday ? "" : dateStr + " · "}{timeStr} IST
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from agent.tools import get_funds, get_positions, pending_approvals
-from agent.scheduler import _is_market_open
+from agent.scheduler import _is_market_open, scheduler
 from api.token_usage import get_today as get_today_usage, get_all as get_all_usage
 
 router = APIRouter()
@@ -24,12 +24,24 @@ def get_state():
     except Exception as e:
         positions = []
 
+    upcoming_jobs = []
+    try:
+        for job in sorted(scheduler.get_jobs(), key=lambda j: j.next_run_time or 0):
+            if job.next_run_time:
+                upcoming_jobs.append({
+                    "id": job.id,
+                    "next_run": job.next_run_time.isoformat(),
+                })
+    except Exception:
+        pass
+
     return {
         "capital": capital,
         "positions": positions,
         "pending_approvals": pending_approvals,
         "market_open": _is_market_open(),
         "scheduler_status": _scheduler_status,
+        "upcoming_jobs": upcoming_jobs,
         "token_usage": get_today_usage(),
     }
 
