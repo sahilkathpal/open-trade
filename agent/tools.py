@@ -187,7 +187,19 @@ def place_trade(
             ),
         }
 
-    # 3. Place entry order (market)
+    # 3. Emit to activity feed so the UI shows what's being placed
+    try:
+        from api import activity_log
+        rr = round((target_price - entry_price) / (entry_price - stop_loss_price), 1) if entry_price != stop_loss_price else 0
+        activity_log.emit({
+            "type": "trade",
+            "symbol": symbol,
+            "summary": f"AUTO {transaction_type} {symbol} @ ₹{entry_price} | SL ₹{stop_loss_price} | Target ₹{target_price} | R:R {rr}:1",
+        })
+    except Exception:
+        pass
+
+    # 4. Place entry order (market)
     entry_resp = _dhan.place_order(
         security_id=security_id,
         txn_type="BUY",
