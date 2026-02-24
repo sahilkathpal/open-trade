@@ -49,7 +49,7 @@ export function ProposalCard({
     setLoading("approve")
     setError(null)
     try {
-      const res = await fetch(`http://localhost:8000/api/approve/${symbol}`, { method: "POST" })
+      const res = await fetch(`/api/approve/${symbol}`, { method: "POST" })
       if (!res.ok) throw new Error("Approval failed")
       setDismissed(true)
       setTimeout(onApproved, 500)
@@ -64,7 +64,7 @@ export function ProposalCard({
     setLoading("deny")
     setError(null)
     try {
-      const res = await fetch(`http://localhost:8000/api/deny/${symbol}`, { method: "POST" })
+      const res = await fetch(`/api/deny/${symbol}`, { method: "POST" })
       if (!res.ok) throw new Error("Deny failed")
       setDismissed(true)
       setTimeout(onDenied, 500)

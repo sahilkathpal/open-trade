@@ -17,7 +17,7 @@ export default function StrategyPage() {
   async function fetchStrategy() {
     try {
       setLoading(true)
-      const res = await fetch("http://localhost:8000/api/memory/STRATEGY.md")
+      const res = await fetch("/api/memory/STRATEGY.md")
       if (!res.ok) throw new Error("fetch failed")
       const data = await res.json()
       setContent(data.content)
@@ -33,7 +33,7 @@ export default function StrategyPage() {
   async function runEod() {
     setRunning(true)
     try {
-      await fetch("http://localhost:8000/api/run/eod", { method: "POST" })
+      await fetch("/api/run/eod", { method: "POST" })
       setTimeout(fetchStrategy, 3000)
     } catch {
       // ignore

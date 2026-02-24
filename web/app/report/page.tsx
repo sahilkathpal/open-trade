@@ -17,7 +17,7 @@ export default function ReportPage() {
   async function fetchReport() {
     try {
       setLoading(true)
-      const res = await fetch("http://localhost:8000/api/memory/MARKET.md")
+      const res = await fetch("/api/memory/MARKET.md")
       if (!res.ok) throw new Error("fetch failed")
       const data = await res.json()
       setContent(data.content)
@@ -32,7 +32,7 @@ export default function ReportPage() {
   async function runPremarket() {
     setRunning(true)
     try {
-      await fetch("http://localhost:8000/api/run/premarket", { method: "POST" })
+      await fetch("/api/run/premarket", { method: "POST" })
       // Refetch after a delay to let it process
       setTimeout(fetchReport, 3000)
     } catch {

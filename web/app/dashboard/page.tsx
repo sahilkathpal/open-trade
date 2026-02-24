@@ -54,7 +54,7 @@ export default function DashboardPage() {
 
   const fetchState = useCallback(async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/state")
+      const res = await fetch("/api/state")
       if (!res.ok) throw new Error("fetch failed")
       const data = await res.json()
       setState(data)
@@ -75,7 +75,7 @@ export default function DashboardPage() {
     let es: EventSource | null = null
 
     function connect() {
-      es = new EventSource("http://localhost:8000/api/activity")
+      es = new EventSource("/api/activity")
       es.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
@@ -100,7 +100,7 @@ export default function DashboardPage() {
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <div className="text-accent-red text-lg mb-2">API Offline</div>
-          <p className="text-text-muted text-sm">Cannot connect to backend at localhost:8000</p>
+          <p className="text-text-muted text-sm">Cannot connect to the API server</p>
         </div>
       </div>
     )

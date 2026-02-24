@@ -46,7 +46,7 @@ export default function JournalPage() {
   useEffect(() => {
     async function fetch_journal() {
       try {
-        const res = await fetch("http://localhost:8000/api/memory/JOURNAL.md")
+        const res = await fetch("/api/memory/JOURNAL.md")
         if (!res.ok) throw new Error("fetch failed")
         const data = await res.json()
         setContent(data.content)

@@ -30,13 +30,14 @@ export function ActivityFeed() {
     let es: EventSource | null = null
 
     function connect() {
-      es = new EventSource("http://localhost:8000/api/activity")
+      es = new EventSource("/api/activity")
 
       es.onopen = () => setConnected(true)
 
       es.onmessage = (event) => {
         try {
           const data: ActivityEvent = JSON.parse(event.data)
+          if (data.type === "ping") return
           setEvents((prev) => [data, ...prev].slice(0, 50))
         } catch {
           // skip malformed events

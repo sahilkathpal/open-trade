@@ -40,7 +40,7 @@ export function PositionCard({ position }: { position: Position }) {
     }
     // actual exit
     try {
-      await fetch(`http://localhost:8000/api/exit/${symbol}`, { method: "POST" })
+      await fetch(`/api/exit/${symbol}`, { method: "POST" })
     } catch {
       // handle silently
     }
