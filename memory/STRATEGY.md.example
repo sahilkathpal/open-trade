@@ -1,0 +1,35 @@
+# Strategy Evolution
+
+*This file is owned by the agent. Read it before every session, update it EOD.*
+*Copy this file to STRATEGY.md to initialise: `cp memory/STRATEGY.md.example memory/STRATEGY.md`*
+
+---
+
+## Current Working Hypothesis
+
+*No strategy formed yet. Starting fresh.*
+
+## What's Working
+
+*Too early to tell — need at least 10 trades.*
+
+## What's Not Working
+
+*Too early to tell.*
+
+## Patterns Observed
+
+*None yet.*
+
+## Week-by-Week Summary
+
+*No trades yet.*
+
+---
+
+## Notes on Initial Approach
+
+- Start with large-cap NSE stocks — better liquidity, tighter spreads
+- Favour momentum setups aligned with broader market direction
+- Use 15-minute charts for entry timing, daily chart for trend context
+- Track which sectors are leading vs lagging each week

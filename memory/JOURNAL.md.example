@@ -1,0 +1,21 @@
+# Trade Journal
+
+*Append-only. Every trade gets an entry — wins and losses alike.*
+*Copy this file to JOURNAL.md to initialise: `cp memory/JOURNAL.md.example memory/JOURNAL.md`*
+
+---
+
+## Format
+
+```
+Date | Symbol | Direction | Entry ₹ | Exit ₹ | Qty | P&L ₹ | R multiple
+Thesis: [Why I entered]
+What happened: [Factual description of how the trade played out]
+Lesson: [One concrete thing I learned or confirmed]
+```
+
+---
+
+## Trades
+
+*No trades yet.*

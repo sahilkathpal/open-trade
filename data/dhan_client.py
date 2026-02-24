@@ -1,0 +1,177 @@
+import os
+import time
+import tempfile
+from pathlib import Path
+from datetime import datetime, timedelta
+
+import pandas as pd
+import httpx
+from dotenv import load_dotenv
+from dhanhq import dhanhq
+
+load_dotenv()
+
+INSTRUMENT_CSV_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
+INSTRUMENT_CACHE = Path(tempfile.gettempdir()) / "dhan_instruments.csv"
+CACHE_TTL_HOURS = 24
+
+_instruments_df: pd.DataFrame | None = None
+_instruments_loaded_at: float = 0.0
+
+
+def _load_instruments() -> pd.DataFrame:
+    global _instruments_df, _instruments_loaded_at
+    now = time.time()
+    if _instruments_df is not None and (now - _instruments_loaded_at) < CACHE_TTL_HOURS * 3600:
+        return _instruments_df
+    if INSTRUMENT_CACHE.exists():
+        mtime = INSTRUMENT_CACHE.stat().st_mtime
+        if (now - mtime) < CACHE_TTL_HOURS * 3600:
+            _instruments_df = pd.read_csv(INSTRUMENT_CACHE, low_memory=False)
+            _instruments_loaded_at = now
+            return _instruments_df
+    with httpx.Client(timeout=30) as client:
+        r = client.get(INSTRUMENT_CSV_URL)
+        r.raise_for_status()
+        INSTRUMENT_CACHE.write_bytes(r.content)
+    _instruments_df = pd.read_csv(INSTRUMENT_CACHE, low_memory=False)
+    _instruments_loaded_at = now
+    return _instruments_df
+
+
+SANDBOX_BASE_URL = "https://sandbox.dhan.co/v2"
+
+
+class DhanClient:
+    def __init__(self):
+        client_id = os.environ["DHAN_CLIENT_ID"]
+        access_token = os.environ["DHAN_ACCESS_TOKEN"]
+        self.dhan = dhanhq(client_id, access_token)
+        if os.getenv("DHAN_SANDBOX", "false").lower() == "true":
+            self.dhan.base_url = SANDBOX_BASE_URL
+
+    def symbol_to_security_id(self, symbol: str) -> str:
+        df = _load_instruments()
+        # Filter NSE equity segment
+        nse_eq = df[
+            (df["SEM_EXM_EXCH_ID"] == "NSE") &
+            (df["SEM_INSTRUMENT_NAME"] == "EQUITY") &
+            (df["SEM_TRADING_SYMBOL"] == symbol)
+        ]
+        if nse_eq.empty:
+            raise ValueError(f"Symbol {symbol} not found in NSE EQ universe")
+        return str(nse_eq.iloc[0]["SEM_SMST_SECURITY_ID"])
+
+    def get_quote(self, symbols: list[str]) -> dict:
+        """Get live LTP + OHLC + volume for a list of NSE EQ symbols."""
+        security_ids = [int(self.symbol_to_security_id(sym)) for sym in symbols]
+        result = self.dhan.quote_data({"NSE_EQ": security_ids})
+        # Sandbox doesn't support the market feed endpoint — return flat ₹100 mock
+        if result.get("status") == "failure" and os.getenv("DHAN_SANDBOX", "false").lower() == "true":
+            return {
+                "status": "success",
+                "data": {sym: {"ltp": 100.0, "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "volume": 100000} for sym in symbols},
+                "sandbox_mock": True,
+            }
+        return result
+
+    def get_history(
+        self,
+        security_id: str,
+        interval: str = "1",
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> pd.DataFrame:
+        """Fetch OHLCV history. interval: '1','5','15','60','D'"""
+        if to_date is None:
+            to_date = datetime.now().strftime("%Y-%m-%d")
+        if from_date is None:
+            from_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+        if interval == "D":
+            resp = self.dhan.historical_daily_data(
+                security_id=security_id,
+                exchange_segment="NSE_EQ",
+                instrument_type="EQUITY",
+                from_date=from_date,
+                to_date=to_date,
+            )
+        else:
+            resp = self.dhan.intraday_minute_data(
+                security_id=security_id,
+                exchange_segment="NSE_EQ",
+                instrument_type="EQUITY",
+                from_date=from_date,
+                to_date=to_date,
+                interval=int(interval),  # dhanhq v2.0.x requires int, not str
+            )
+
+        if not resp or "data" not in resp:
+            return pd.DataFrame()
+
+        data = resp["data"]
+        df = pd.DataFrame({
+            "timestamp": data.get("timestamp", []),
+            "open":      data.get("open", []),
+            "high":      data.get("high", []),
+            "low":       data.get("low", []),
+            "close":     data.get("close", []),
+            "volume":    data.get("volume", []),
+        })
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata")
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+
+    def place_order(
+        self,
+        security_id: str,
+        txn_type: str,
+        qty: int,
+        order_type: str,
+        product_type: str,
+        price: float = 0,
+        trigger_price: float = 0,
+    ) -> dict:
+        """Place an order on Dhan."""
+        dhan_txn = "BUY" if txn_type == "BUY" else "SELL"
+        dhan_order_type = {
+            "MARKET": "MARKET",
+            "LIMIT": "LIMIT",
+            "STOPLIMIT": "STOP_LOSS",
+        }.get(order_type, order_type)
+        dhan_product = {
+            "INTRA": "INTRADAY",
+            "CNC": "CNC",
+        }.get(product_type, product_type)
+
+        return self.dhan.place_order(
+            security_id=security_id,
+            exchange_segment="NSE_EQ",
+            transaction_type=dhan_txn,
+            quantity=qty,
+            order_type=dhan_order_type,
+            product_type=dhan_product,
+            price=price,
+            trigger_price=trigger_price,
+        )
+
+    def get_positions(self) -> list:
+        """Get current open positions."""
+        resp = self.dhan.get_positions()
+        if isinstance(resp, dict) and "data" in resp:
+            return resp["data"] or []
+        if isinstance(resp, list):
+            return resp
+        return []
+
+    def get_funds(self) -> dict:
+        """Returns available_balance, used_margin, day_pnl."""
+        resp = self.dhan.get_fund_limits()
+        if isinstance(resp, dict):
+            data = resp.get("data", resp)
+            return {
+                "available_balance": float(data.get("availabelBalance", data.get("available_balance", 0))),
+                "used_margin":       float(data.get("utilizedAmount", data.get("used_margin", 0))),
+                "day_pnl":           float(data.get("unrealizedProfit", data.get("day_pnl", 0))),
+            }
+        return {"available_balance": 0.0, "used_margin": 0.0, "day_pnl": 0.0}

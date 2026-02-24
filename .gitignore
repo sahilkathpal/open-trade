@@ -1,0 +1,30 @@
+# Credentials — never commit
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Agent runtime state — do not commit
+memory/PENDING.json
+memory/USAGE.json
+
+# Agent-written memory files — commit only the .example templates
+memory/MARKET.md
+memory/STRATEGY.md
+memory/JOURNAL.md
+
+# Agent runtime cache
+/tmp/dhan_instruments.csv
+
+# Next.js
+web/.next/
+web/node_modules/
+web/package-lock.json
+
+# macOS
+.DS_Store
