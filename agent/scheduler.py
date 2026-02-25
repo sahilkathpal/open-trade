@@ -198,7 +198,7 @@ def setup_scheduler():
     )
     scheduler.add_job(
         run_heartbeat, "interval",
-        minutes=5,
+        minutes=1,
         id="heartbeat", replace_existing=True,
     )
     scheduler.add_job(
