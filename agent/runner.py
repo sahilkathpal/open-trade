@@ -71,6 +71,52 @@ This is the execution planning job — set real entry levels using today's live 
 Be honest. If the first candle doesn't confirm an immediate entry, use add_to_watchlist() rather
 than forcing a trade — there will be other opportunities in the session.""",
 
+    "midmorning": """It is 10:30 AM IST. The first hour of trading has settled.
+This is a lightweight mid-session scan — not a full re-screen. Be selective. "No setup" is a valid outcome.
+
+Context: MARKET.md shows what was identified this morning and the current state (PLACED / WATCHING / INVALIDATED).
+
+Your job:
+1. Call get_positions() and get_funds() to know current exposure and available capital.
+   - If 2 positions are already open or daily P&L is near -₹500, return immediately — no new trades.
+2. Check the watchlist (read_memory WATCHLIST.json if it exists) — are any of today's setups still pending?
+3. Scan for mid-session setups on quality large-cap NSE stocks (Nifty 50 / Nifty Next 50):
+   - Opening Range Breakout (ORB): stock broke above the 9:15–9:45 AM range on volume.
+     get_historical_data(symbol, interval="15", days=1) — check if a candle closed above the opening range high.
+   - VWAP reclaim: stock was below VWAP at open, has now reclaimed it with a bullish candle and volume.
+   - Only check 3–5 stocks maximum. Prefer sectors with tailwinds from today's news (see MARKET.md context).
+4. For any valid setup:
+   - Verify fundamentals are acceptable (PE < 30, positive margins) — use get_fundamentals() only if unsure.
+   - Entry must be current price or tight limit — do NOT chase a move already up >2% from the ORB level.
+   - Stop loss: below the ORB low or VWAP, 1.5–2.5% below entry.
+   - Target: minimum 2R. Given EOD exit at 3:10 PM (~2.5 hours away), target must be realistic.
+   - Call add_to_watchlist() if entry conditions aren't met yet but setup is developing.
+   - Call place_trade() if price is at entry right now.
+5. Update MARKET.md: append a "Mid-morning scan" section with findings (even if nothing was found).
+
+Be honest and brief. Most days this scan will find nothing — that is the correct and expected outcome.""",
+
+    "midday": """It is 12:30 PM IST. Post-lunch scan.
+This is a narrow opportunistic check — not a full re-screen. "No setup" is the expected outcome most days.
+
+Context: MARKET.md shows the full day's activity so far.
+
+Your job:
+1. Call get_positions() and get_funds() first.
+   - If 2 positions are already open, or daily P&L is near -₹500, or available capital is low: stop here.
+2. Look for second-leg setups on stocks that had strong morning moves:
+   - Flag/consolidation breakout: strong move in first hour, consolidation for 1–2 hours, now breaking out again on volume.
+   - Sector follow-through: if a sector was strong this morning, are laggards in that sector now catching up?
+   - get_historical_data(symbol, interval="15", days=1) to check candle structure and VWAP position.
+3. Only check stocks with a clear reason to look at them (from MARKET.md context or this morning's move).
+   Do NOT screen fresh stocks with no morning context — that is pre-market's job.
+4. Time constraint: EOD exit is at 3:10 PM — entries here have ~2.5 hours. Target must be achievable.
+   Avoid entries where the target requires >3% move in 2.5 hours unless there is very strong momentum.
+5. For any valid setup: add_to_watchlist() or place_trade() as appropriate.
+6. Update MARKET.md: append a "Midday scan" section. Note what was checked and why you acted or passed.
+
+Bias toward passing. A forced midday trade is worse than no trade.""",
+
     "eod": """End of day review. Please:
 
 1. Read MARKET.md (today's canvas) and JOURNAL.md (trade history).
@@ -144,9 +190,11 @@ def run(job_type: str, extra_prompt: str = "") -> str:
     soul = soul_path.read_text() if soul_path.exists() else "You are an autonomous trading agent."
 
     context_files = {
-        "premarket": ["memory/STRATEGY.md"],
-        "execution": ["memory/MARKET.md"],
-        "eod":       ["memory/MARKET.md", "memory/JOURNAL.md"],
+        "premarket":  ["memory/STRATEGY.md"],
+        "execution":  ["memory/MARKET.md"],
+        "midmorning": ["memory/MARKET.md", "memory/STRATEGY.md"],
+        "midday":     ["memory/MARKET.md"],
+        "eod":        ["memory/MARKET.md", "memory/JOURNAL.md"],
     }
 
     memory_parts = []

@@ -216,6 +216,8 @@ export default function DashboardPage() {
                     const labels: Record<string, string> = {
                       premarket: "Pre-market screening",
                       execution: "Execution planning",
+                      midmorning: "Mid-morning scan",
+                      midday: "Midday scan",
                       heartbeat: "Heartbeat",
                       clear_proposals: "Clear proposals",
                       eod: "EOD report",
