@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from agent.tools import get_funds, get_positions, get_market_quote, pending_approvals
+from agent.tools import get_funds, get_positions, get_market_quote, pending_approvals, load_watchlist
 from agent.heartbeat import load_tracked_positions, _ltp_from_quote
 from agent.scheduler import _is_market_open, scheduler
 from api.token_usage import get_today as get_today_usage, get_all as get_all_usage
@@ -86,6 +86,7 @@ def get_state():
         "capital": capital,
         "positions": positions,
         "pending_approvals": pending_approvals,
+        "watchlist": load_watchlist(),
         "market_open": _is_market_open(),
         "scheduler_status": _scheduler_status,
         "upcoming_jobs": upcoming_jobs,

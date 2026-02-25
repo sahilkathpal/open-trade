@@ -9,6 +9,7 @@ import { PositionCard } from "@/components/PositionCard"
 import { ActivityFeed } from "@/components/ActivityFeed"
 import { MISCountdown } from "@/components/MISCountdown"
 import { TokenUsageCard } from "@/components/TokenUsageCard"
+import { WatchlistCard } from "@/components/WatchlistCard"
 
 interface TokenUsage {
   input_tokens: number
@@ -46,6 +47,17 @@ interface AppState {
   scheduler_status: { last_premarket: string | null; last_eod: string | null }
   upcoming_jobs: Array<{ id: string; next_run: string }>
   token_usage: TokenUsage
+  watchlist: Record<string, {
+    security_id: string
+    entry_min: number
+    entry_max: number
+    stop_loss_price: number
+    target_price: number
+    quantity: number
+    thesis: string
+    rsi_max?: number
+    candle_close_above?: number
+  }>
 }
 
 export default function DashboardPage() {
@@ -144,6 +156,20 @@ export default function DashboardPage() {
                 onDenied={fetchState}
               />
             ))}
+          </div>
+        )}
+
+        {/* Row 2b: Watchlist */}
+        {state.watchlist && Object.keys(state.watchlist).length > 0 && (
+          <div className="space-y-4">
+            <h2 className="text-sm font-medium text-text-muted uppercase tracking-wider">
+              Watchlist ({Object.keys(state.watchlist).length})
+            </h2>
+            <div className="grid grid-cols-2 gap-4">
+              {Object.entries(state.watchlist).map(([symbol, entry]) => (
+                <WatchlistCard key={symbol} symbol={symbol} entry={entry} />
+              ))}
+            </div>
           </div>
         )}
 
