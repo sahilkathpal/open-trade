@@ -511,13 +511,11 @@ export default function SettingsPage() {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-text-primary font-mono">
-                  {autonomous ? "Autonomous" : "Approval required"}
-                </p>
+                <p className="text-sm text-text-primary font-mono">Autonomous trading</p>
                 <p className="text-xs text-text-muted mt-0.5">
                   {autonomous
-                    ? "Trades execute directly on your broker account without approval"
-                    : "Each trade proposal will be sent to you on Telegram for approval before executing"}
+                    ? "On — trades execute directly without approval"
+                    : "Off — each proposal is sent to Telegram for your approval"}
                 </p>
               </div>
               <button
