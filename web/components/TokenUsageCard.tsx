@@ -31,7 +31,7 @@ export function TokenUsageCard({ usage }: { usage: TokenUsage }) {
     <div className="bg-surface rounded-lg border border-border p-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-xs font-medium text-text-muted uppercase tracking-wider">
-          Token Usage Today
+          LLM Token Usage Today
         </h3>
         <span className="font-mono text-sm text-text-primary">
           ${usage.cost_usd.toFixed(2)}{" "}

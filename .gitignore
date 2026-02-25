@@ -25,6 +25,8 @@ memory/JOURNAL.md
 web/.next/
 web/node_modules/
 web/package-lock.json
+web/.env.local
+web/tsconfig.tsbuildinfo
 
 # macOS
 .DS_Store

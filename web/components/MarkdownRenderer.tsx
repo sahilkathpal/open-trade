@@ -5,6 +5,11 @@ import remarkGfm from "remark-gfm"
 import type { Components } from "react-markdown"
 
 const components: Components = {
+  h1: ({ children }) => (
+    <h1 className="text-2xl font-bold text-text-primary border-b border-border pb-2 mb-4 mt-2">
+      {children}
+    </h1>
+  ),
   h2: ({ children }) => (
     <h2 className="text-xl font-semibold text-text-primary border-b border-border pb-2 mb-3 mt-6">
       {children}

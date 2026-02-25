@@ -22,40 +22,47 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    from agent.scheduler import setup_scheduler, set_telegram_sender
-    from agent.telegram import setup_telegram, send_message
-    from agent.tools import pending_approvals, place_trade
+    # Initialize Firebase (no-op if not configured)
+    from api.firebase_admin import init_firebase
+    init_firebase()
 
-    # Wire up Telegram
-    telegram_app = setup_telegram(
-        pending_approvals=pending_approvals,
-        place_trade_fn=place_trade,
-    )
-    set_telegram_sender(send_message)
+    from agent.scheduler import setup_scheduler, set_telegram_sender
 
     # Start scheduler
     sched = setup_scheduler()
     sched.start()
     logger.info("Scheduler started (pre-market 08:45, heartbeat every 5m, EOD 15:35 IST)")
 
-    # Start Telegram bot polling (blocks until Ctrl-C)
-    logger.info("Starting Telegram bot polling...")
-    await send_message("Trading agent started. Type /start for help.")
-    async with telegram_app:
-        await telegram_app.initialize()
-        await telegram_app.start()
-        await telegram_app.updater.start_polling(allowed_updates=["message"])
-        # Keep running until interrupted
+    # Telegram is optional
+    telegram_app = None
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if bot_token:
+        from agent.telegram import setup_telegram, send_message
+        telegram_app = setup_telegram()
+        set_telegram_sender(send_message)
+        logger.info("Starting Telegram bot polling...")
+        async with telegram_app:
+            await telegram_app.initialize()
+            await telegram_app.start()
+            await telegram_app.updater.start_polling(allowed_updates=["message"])
+            await send_message("Trading agent started. Type /start for help.")
+            try:
+                await asyncio.Event().wait()
+            except (KeyboardInterrupt, SystemExit):
+                pass
+            finally:
+                await telegram_app.updater.stop()
+                await telegram_app.stop()
+                await telegram_app.shutdown()
+    else:
+        logger.warning("TELEGRAM_BOT_TOKEN not set — Telegram disabled")
         try:
             await asyncio.Event().wait()
         except (KeyboardInterrupt, SystemExit):
             pass
-        finally:
-            await telegram_app.updater.stop()
-            await telegram_app.stop()
-            await telegram_app.shutdown()
-            sched.shutdown()
-            logger.info("Shutdown complete.")
+
+    sched.shutdown()
+    logger.info("Shutdown complete.")
 
 
 def entry():

@@ -111,6 +111,29 @@ Constraints:
 6. Update MARKET.md to close out today's candidates (mark FILLED/INVALIDATED/EXPIRED).
 
 Be honest in your evaluation. If you made a mistake, record it clearly so you can learn from it.""",
+
+    "catchup": """You are joining the market session late — the current time is {current_time} IST.
+Pre-market screening (8:45 AM) and execution planning (9:35 AM) did not run for this account today.
+Do both in one pass, using the intraday data that is already available.
+
+1. Read STRATEGY.md to recall your working hypothesis and recent learnings.
+2. Fetch markets and economy news (categories: markets, economy). Assess today's macro sentiment.
+3. Screen for 2–3 candidate stocks:
+   - Fundamental quality: get_fundamentals() for P/E, margins, ROE, revenue growth.
+     Prefer PE < 25, margins > 15%, positive revenue growth.
+   - Daily trend: get_historical_data(symbol, interval="D", days=60).
+   - Today's intraday action: get_historical_data(symbol, interval="15", days=1).
+     Multiple candles have already printed — use them to confirm or invalidate the thesis.
+4. For each candidate, get_market_quote() for the current price:
+   - Entry now makes sense (not chasing, min 2R): call place_trade().
+   - Close but conditions not yet met: call add_to_watchlist() with exact entry range, SL, target.
+   - Move already happened or thesis broken: skip it, note why.
+5. Write MARKET.md with today's date, macro context, and each candidate's status
+   (PLACED / WATCHING / SKIPPED) with reasoning. Note the late start.
+6. Set monitoring triggers with write_trigger() for any placed/watched positions.
+   Always set expires_at to today at 15:00 IST.
+
+Time is limited — be selective. If nothing looks good this late, zero trades is the right answer.""",
 }
 
 
@@ -170,14 +193,18 @@ def run(job_type: str, extra_prompt: str = "") -> str:
     activity_log.emit({"type": "job_start", "summary": f"{job_type} started"})
 
     # Build system prompt from SOUL.md + relevant memory files
+    # SOUL.md is shared; per-user files live in get_user_ctx().memory_dir
     soul_path = Path("memory/SOUL.md")
     soul = soul_path.read_text() if soul_path.exists() else "You are an autonomous trading agent."
 
+    from agent.user_context import get_user_ctx
+    mem = get_user_ctx().memory_dir
     context_files = {
-        "premarket": ["memory/STRATEGY.md"],
-        "execution": ["memory/MARKET.md"],
-        "trigger":   ["memory/MARKET.md"],
-        "eod":       ["memory/MARKET.md", "memory/JOURNAL.md"],
+        "premarket": [mem / "STRATEGY.md"],
+        "execution": [mem / "MARKET.md"],
+        "trigger":   [mem / "MARKET.md"],
+        "catchup":   [mem / "STRATEGY.md"],
+        "eod":       [mem / "MARKET.md", mem / "JOURNAL.md"],
     }
 
     memory_parts = []
@@ -189,8 +216,10 @@ def run(job_type: str, extra_prompt: str = "") -> str:
     memory_context = "\n\n---\n\n".join(memory_parts)
     system = f"{soul}\n\n---\n\n{memory_context}" if memory_context else soul
 
-    # Initial user message
-    user_content = PROMPTS[job_type]
+    # Initial user message — inject current IST time for time-aware prompts
+    import pytz as _pytz
+    _now = __import__("datetime").datetime.now(_pytz.timezone("Asia/Kolkata"))
+    user_content = PROMPTS[job_type].replace("{current_time}", _now.strftime("%I:%M %p"))
     if extra_prompt:
         user_content += f"\n\n{extra_prompt}"
 

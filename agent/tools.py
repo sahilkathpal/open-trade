@@ -1,77 +1,164 @@
-import os
 import json
-from pathlib import Path
+import logging
 from datetime import datetime
+from pathlib import Path
 
-from data.dhan_client import DhanClient
+import pytz as _pytz
+
+_IST = _pytz.timezone("Asia/Kolkata")
+
 from data.indicators import compute_indicators
 from data.fundamentals import get_fundamentals as _get_fundamentals
 from data.news import fetch_news as _fetch_news
-from risk.guard import RiskGuard
+from agent.user_context import get_user_ctx
 
-# ── singletons ────────────────────────────────────────────────────────────────
-_dhan = DhanClient()
-_risk = RiskGuard(seed_capital=float(os.getenv("SEED_CAPITAL", "10000")))
+logger = logging.getLogger(__name__)
 
-# Module-level store for pending trade approvals
-# key: symbol, value: full trade params dict
-# Persisted to memory/PENDING.json so proposals survive process restarts
-_PENDING_PATH = Path("memory/PENDING.json")
-_OPEN_POSITIONS_PATH = Path("memory/OPEN_POSITIONS.json")
-_WATCHLIST_PATH = Path("memory/WATCHLIST.json")
-_TRIGGERS_PATH = Path("memory/TRIGGERS.json")
+ALLOWED_READ  = {"MARKET.md", "STRATEGY.md", "JOURNAL.md", "HEARTBEAT.md", "SOUL.md"}
+ALLOWED_WRITE = {"MARKET.md", "STRATEGY.md"}
 
 
-def load_watchlist() -> dict:
-    if _WATCHLIST_PATH.exists():
+# ── per-user path helpers ──────────────────────────────────────────────────────
+
+def _pending_path() -> Path:
+    return get_user_ctx().memory_dir / "PENDING.json"
+
+def _positions_path() -> Path:
+    return get_user_ctx().memory_dir / "OPEN_POSITIONS.json"
+
+def _watchlist_path() -> Path:
+    return get_user_ctx().memory_dir / "WATCHLIST.json"
+
+def _triggers_path() -> Path:
+    return get_user_ctx().memory_dir / "TRIGGERS.json"
+
+def _memory_dir() -> Path:
+    return get_user_ctx().memory_dir
+
+
+# ── pending approvals (file-backed, per-user) ──────────────────────────────────
+
+def get_pending_approvals() -> dict:
+    path = _pending_path()
+    if path.exists():
         try:
-            return json.loads(_WATCHLIST_PATH.read_text())
+            return json.loads(path.read_text())
         except Exception:
             pass
     return {}
 
 
-def _save_watchlist(data: dict):
-    _WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _WATCHLIST_PATH.write_text(json.dumps(data, indent=2))
+def save_pending_approvals(data: dict):
+    path = _pending_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
 
+
+# ── open positions helpers ─────────────────────────────────────────────────────
 
 def _load_open_positions() -> dict:
-    if _OPEN_POSITIONS_PATH.exists():
+    path = _positions_path()
+    if path.exists():
         try:
-            return json.loads(_OPEN_POSITIONS_PATH.read_text())
+            return json.loads(path.read_text())
         except Exception:
             pass
     return {}
 
 
 def _save_open_positions(data: dict):
-    _OPEN_POSITIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _OPEN_POSITIONS_PATH.write_text(json.dumps(data, indent=2))
+    path = _positions_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
 
 
-def _load_pending() -> dict[str, dict]:
-    if _PENDING_PATH.exists():
+# ── watchlist helpers ──────────────────────────────────────────────────────────
+
+def load_watchlist() -> dict:
+    path = _watchlist_path()
+    if path.exists():
         try:
-            return json.loads(_PENDING_PATH.read_text())
+            return json.loads(path.read_text())
         except Exception:
             pass
     return {}
 
 
-def _save_pending():
-    _PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _PENDING_PATH.write_text(json.dumps(pending_approvals, indent=2))
+def _save_watchlist(data: dict):
+    path = _watchlist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
 
 
-pending_approvals: dict[str, dict] = _load_pending()
+# ── trigger helpers ────────────────────────────────────────────────────────────
 
-MEMORY_DIR = Path("memory")
-ALLOWED_READ  = {"MARKET.md", "STRATEGY.md", "JOURNAL.md", "HEARTBEAT.md", "SOUL.md"}
-ALLOWED_WRITE = {"MARKET.md", "STRATEGY.md"}
+def load_triggers() -> list:
+    path = _triggers_path()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            return data if isinstance(data, list) else []
+        except Exception:
+            pass
+    return []
 
 
-# ── helper ────────────────────────────────────────────────────────────────────
+def _save_triggers(triggers: list):
+    path = _triggers_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(triggers, indent=2, default=str))
+
+
+# ── agent P&L tracking (file-backed, per-user) ────────────────────────────────
+
+def _agent_pnl_path() -> Path:
+    return get_user_ctx().memory_dir / "AGENT_PNL.json"
+
+
+def _load_agent_pnl() -> dict:
+    path = _agent_pnl_path()
+    today = datetime.now(_IST).strftime("%Y-%m-%d")
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            if data.get("date") == today:
+                return data
+        except Exception:
+            pass
+    return {"date": today, "tracked_symbols": [], "realized": 0.0}
+
+
+def _save_agent_pnl(data: dict):
+    path = _agent_pnl_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, default=str))
+
+
+def get_agent_pnl() -> dict:
+    """Return today's agent P&L (realized only; unrealized computed in state API)."""
+    return _load_agent_pnl()
+
+
+def reset_agent_pnl():
+    """Reset agent P&L for a new trading session (premarket or catchup)."""
+    today = datetime.now(_IST).strftime("%Y-%m-%d")
+    _save_agent_pnl({"date": today, "tracked_symbols": [], "realized": 0.0})
+
+
+def _extract_ltp(quote: dict) -> float | None:
+    """Extract LTP from a get_market_quote() response."""
+    if not isinstance(quote, dict):
+        return None
+    data = quote.get("data", {})
+    for val in data.values():
+        if isinstance(val, dict):
+            ltp = val.get("ltp") or val.get("last_price")
+            if ltp is not None:
+                return float(ltp)
+    return None
+
+
+# ── helper ─────────────────────────────────────────────────────────────────────
 def _fmt_proposal(symbol, qty, entry, sl, target_est, thesis):
     rr = (target_est - entry) / (entry - sl) if entry != sl else 0
     return (
@@ -89,7 +176,7 @@ def _fmt_proposal(symbol, qty, entry, sl, target_est, thesis):
 
 def get_market_quote(symbols: list[str]) -> dict:
     try:
-        return _dhan.get_quote(symbols)
+        return get_user_ctx().dhan.get_quote(symbols)
     except Exception as e:
         return {"error": str(e)}
 
@@ -99,18 +186,15 @@ def get_historical_data(symbol: str, interval: str = "15", days: int = 30) -> di
         from datetime import timedelta
         to_date = datetime.now().strftime("%Y-%m-%d")
         from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        security_id = _dhan.symbol_to_security_id(symbol)
-        df = _dhan.get_history(security_id, interval=interval, from_date=from_date, to_date=to_date)
+        dhan = get_user_ctx().dhan
+        security_id = dhan.symbol_to_security_id(symbol)
+        df = dhan.get_history(security_id, interval=interval, from_date=from_date, to_date=to_date)
         if df.empty:
             return {"symbol": symbol, "data": [], "error": "No data returned"}
         rows = compute_indicators(df)
         if not rows:
             return {"symbol": symbol, "error": "Indicator computation returned no rows"}
 
-        # Return compact summary to keep token usage low:
-        # - Period stats (high/low/avg_volume)
-        # - Latest indicator snapshot (last row)
-        # - Last 5 candles for recent price action
         last = rows[-1]
         closes = [r["close"] for r in rows if r.get("close") is not None]
         volumes = [r["volume"] for r in rows if r.get("volume") is not None]
@@ -153,18 +237,19 @@ def fetch_news(category: str = "markets", limit: int = 15) -> list[dict]:
         return [{"error": str(e)}]
 
 
-
 def get_positions() -> list:
     try:
-        return _dhan.get_positions()
+        return get_user_ctx().dhan.get_positions()
     except Exception as e:
         return [{"error": str(e)}]
 
 
 def get_funds() -> dict:
+    ctx = get_user_ctx()
     try:
-        return _dhan.get_funds()
+        return ctx.dhan.get_funds()
     except Exception as e:
+        logger.error("get_funds failed for uid=%s: %s", ctx.uid, e)
         return {"error": str(e)}
 
 
@@ -179,26 +264,27 @@ def place_trade(
     target_price: float = 0.0,
     approved: bool = False,
 ) -> dict:
+    ctx = get_user_ctx()
+
     # 1. Always run risk validation first
-    funds = _dhan.get_funds()
-    positions = _dhan.get_positions()
-    ok, reason = _risk.validate(
+    funds = ctx.dhan.get_funds()
+    positions = ctx.dhan.get_positions()
+    ok, reason = ctx.risk.validate(
         entry_price=entry_price,
         quantity=quantity,
         stop_loss_price=stop_loss_price,
         open_position_count=len(positions),
         available_funds=funds.get("available_balance", 0),
-        day_pnl=funds.get("day_pnl", 0),
     )
     if not ok:
         return {"status": "rejected", "reason": reason}
 
     # 2. Check approval requirement
-    autonomous = os.getenv("AUTONOMOUS", "false").lower() == "true"
-    if not approved and not autonomous:
+    if not approved and not ctx.autonomous:
         proposal = _fmt_proposal(symbol, quantity, entry_price, stop_loss_price,
                                   target_price or entry_price * 1.04, thesis)
-        pending_approvals[symbol] = {
+        pending = get_pending_approvals()
+        pending[symbol] = {
             "symbol": symbol,
             "security_id": security_id,
             "transaction_type": transaction_type,
@@ -208,7 +294,7 @@ def place_trade(
             "thesis": thesis,
             "target_price": target_price,
         }
-        _save_pending()
+        save_pending_approvals(pending)
         return {
             "status": "pending_approval",
             "proposal": proposal,
@@ -218,7 +304,7 @@ def place_trade(
             ),
         }
 
-    # 3. Emit to activity feed so the UI shows what's being placed
+    # 3. Emit to activity feed
     try:
         from api import activity_log
         rr = round((target_price - entry_price) / (entry_price - stop_loss_price), 1) if entry_price != stop_loss_price else 0
@@ -231,7 +317,7 @@ def place_trade(
         pass
 
     # 4. Place entry order (market)
-    entry_resp = _dhan.place_order(
+    entry_resp = ctx.dhan.place_order(
         security_id=security_id,
         txn_type="BUY",
         qty=quantity,
@@ -240,8 +326,8 @@ def place_trade(
         price=0,
     )
 
-    # 4. Place stop-loss order
-    sl_resp = _dhan.place_order(
+    # 5. Place stop-loss order
+    sl_resp = ctx.dhan.place_order(
         security_id=security_id,
         txn_type="SELL",
         qty=quantity,
@@ -251,21 +337,30 @@ def place_trade(
         trigger_price=round(stop_loss_price * 1.001, 2),
     )
 
-    # Track locally so the deterministic heartbeat knows SL/target/entry
+    # Track locally so the heartbeat knows SL/target/entry
     sl_order_id = None
     if isinstance(sl_resp, dict):
         sl_order_id = sl_resp.get("orderId") or sl_resp.get("data", {}).get("orderId")
 
     open_positions = _load_open_positions()
     open_positions[symbol] = {
-        "security_id":    security_id,
-        "entry_price":    entry_price,
+        "security_id":     security_id,
+        "entry_price":     entry_price,
         "stop_loss_price": stop_loss_price,
-        "target_price":   target_price,
-        "quantity":       quantity,
-        "sl_order_id":    sl_order_id,
+        "target_price":    target_price,
+        "quantity":        quantity,
+        "sl_order_id":     sl_order_id,
     }
     _save_open_positions(open_positions)
+
+    # Record this symbol as agent-tracked for P&L attribution
+    try:
+        pnl_data = _load_agent_pnl()
+        if symbol not in pnl_data["tracked_symbols"]:
+            pnl_data["tracked_symbols"].append(symbol)
+            _save_agent_pnl(pnl_data)
+    except Exception as e:
+        logger.warning("Failed to record tracked symbol %s: %s", symbol, e)
 
     return {
         "status":      "placed",
@@ -277,7 +372,11 @@ def place_trade(
 
 def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> dict:
     try:
-        resp = _dhan.place_order(
+        ctx = get_user_ctx()
+        open_positions = _load_open_positions()
+        pos_data = open_positions.get(symbol, {})
+
+        resp = ctx.dhan.place_order(
             security_id=security_id,
             txn_type="SELL",
             qty=quantity,
@@ -285,14 +384,14 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> 
             product_type="INTRA",
             price=0,
         )
-        # Cancel the associated SL order to free up blocked margin
-        open_positions = _load_open_positions()
-        sl_order_id = open_positions.get(symbol, {}).get("sl_order_id")
+
+        sl_order_id = pos_data.get("sl_order_id")
         if sl_order_id:
             try:
-                _dhan.cancel_order(sl_order_id)
+                ctx.dhan.cancel_order(sl_order_id)
             except Exception:
-                pass  # best-effort — don't fail the exit if cancel fails
+                pass
+
         open_positions.pop(symbol, None)
         _save_open_positions(open_positions)
         return {"status": "exit_placed", "symbol": symbol, "reason": reason, "order": resp}
@@ -315,14 +414,14 @@ def add_to_watchlist(
     """Register a stock for price-triggered intraday entry."""
     watchlist = load_watchlist()
     watchlist[symbol] = {
-        "security_id":       security_id,
-        "entry_min":         entry_min,
-        "entry_max":         entry_max,
-        "stop_loss_price":   stop_loss_price,
-        "target_price":      target_price,
-        "quantity":          quantity,
-        "thesis":            thesis,
-        "rsi_max":           rsi_max,
+        "security_id":        security_id,
+        "entry_min":          entry_min,
+        "entry_max":          entry_max,
+        "stop_loss_price":    stop_loss_price,
+        "target_price":       target_price,
+        "quantity":           quantity,
+        "thesis":             thesis,
+        "rsi_max":            rsi_max,
         "candle_close_above": candle_close_above,
     }
     _save_watchlist(watchlist)
@@ -342,24 +441,9 @@ def remove_from_watchlist(symbol: str) -> dict:
 def get_index_quote(index: str = "NIFTY50") -> dict:
     """Get LTP for a NSE index (NIFTY50, BANKNIFTY, FINNIFTY)."""
     try:
-        return _dhan.get_index_quote(index)
+        return get_user_ctx().dhan.get_index_quote(index)
     except Exception as e:
         return {"error": str(e)}
-
-
-def load_triggers() -> list:
-    if _TRIGGERS_PATH.exists():
-        try:
-            data = json.loads(_TRIGGERS_PATH.read_text())
-            return data if isinstance(data, list) else []
-        except Exception:
-            pass
-    return []
-
-
-def _save_triggers(triggers: list):
-    _TRIGGERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _TRIGGERS_PATH.write_text(json.dumps(triggers, indent=2, default=str))
 
 
 def write_trigger(
@@ -376,34 +460,22 @@ def write_trigger(
     """
     Set a monitoring trigger. The heartbeat evaluates all triggers every 5 minutes
     and invokes Claude when a condition is met.
-
-    type + required fields:
-      time              → at (e.g. "10:30")
-      price_above       → symbol, threshold
-      price_below       → symbol, threshold
-      index_above       → symbol (NIFTY50/BANKNIFTY/FINNIFTY), threshold
-      index_below       → symbol, threshold
-      near_stop         → symbol (open position), buffer_pct (% above SL to fire)
-      near_target       → symbol (open position), buffer_pct (% below target to fire)
-      day_pnl_above     → threshold (₹)
-      day_pnl_below     → threshold (₹)
-      position_pnl_pct  → symbol (open position), above_pct (%)
     """
     triggers = load_triggers()
-    triggers = [t for t in triggers if t.get("id") != id]  # replace if exists
+    triggers = [t for t in triggers if t.get("id") != id]
     trigger = {"id": id, "type": type, "reason": reason, "expires_at": expires_at}
-    if symbol is not None:    trigger["symbol"]     = symbol
-    if threshold is not None: trigger["threshold"]   = threshold
-    if at is not None:        trigger["at"]          = at
-    if buffer_pct is not None: trigger["buffer_pct"] = buffer_pct
-    if above_pct is not None: trigger["above_pct"]   = above_pct
+    if symbol is not None:     trigger["symbol"]     = symbol
+    if threshold is not None:  trigger["threshold"]   = threshold
+    if at is not None:         trigger["at"]          = at
+    if buffer_pct is not None: trigger["buffer_pct"]  = buffer_pct
+    if above_pct is not None:  trigger["above_pct"]   = above_pct
     triggers.append(trigger)
     _save_triggers(triggers)
     return {"status": "ok", "trigger_id": id, "type": type}
 
 
 def remove_trigger(id: str) -> dict:
-    """Remove a trigger by id (e.g. after deciding it's no longer relevant)."""
+    """Remove a trigger by id."""
     triggers = load_triggers()
     before = len(triggers)
     triggers = [t for t in triggers if t.get("id") != id]
@@ -420,7 +492,11 @@ def list_triggers() -> list:
 def read_memory(filename: str) -> str:
     if filename not in ALLOWED_READ:
         return f"Error: {filename} not in allowed list {ALLOWED_READ}"
-    path = MEMORY_DIR / filename
+    # SOUL.md and HEARTBEAT.md are shared (project-level)
+    if filename in ("SOUL.md", "HEARTBEAT.md"):
+        path = Path("memory") / filename
+    else:
+        path = _memory_dir() / filename
     if not path.exists():
         return f"File {filename} does not exist yet."
     return path.read_text()
@@ -429,14 +505,14 @@ def read_memory(filename: str) -> str:
 def write_memory(filename: str, content: str) -> dict:
     if filename not in ALLOWED_WRITE:
         return {"error": f"{filename} not in allowed write list {ALLOWED_WRITE}"}
-    path = MEMORY_DIR / filename
+    path = _memory_dir() / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return {"status": "ok", "filename": filename, "bytes_written": len(content)}
 
 
 def append_journal(entry: str) -> dict:
-    path = MEMORY_DIR / "JOURNAL.md"
+    path = _memory_dir() / "JOURNAL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
         f.write(f"\n\n---\n\n{entry}")
@@ -549,40 +625,32 @@ ALL_TOOL_SCHEMAS = [
     {
         "name": "get_positions",
         "description": "Get current open positions from Dhan.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_funds",
         "description": "Get available balance, used margin, and day P&L from Dhan.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "place_trade",
         "description": (
             "Place a risk-validated trade on Dhan. Runs RiskGuard checks first. "
-            "If AUTONOMOUS=false and not yet approved, returns a pending_approval proposal "
+            "If autonomous=false and not yet approved, returns a pending_approval proposal "
             "that must be sent to the user via Telegram."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "symbol":            {"type": "string"},
-                "security_id":       {"type": "string"},
-                "transaction_type":  {"type": "string", "enum": ["BUY", "SELL"]},
-                "quantity":          {"type": "integer"},
-                "entry_price":       {"type": "number"},
-                "stop_loss_price":   {"type": "number"},
-                "thesis":            {"type": "string", "description": "1-2 sentence trade thesis"},
-                "target_price":      {"type": "number", "description": "Estimated target price for R:R calculation"},
-                "approved":          {"type": "boolean", "default": False},
+                "symbol":           {"type": "string"},
+                "security_id":      {"type": "string"},
+                "transaction_type": {"type": "string", "enum": ["BUY", "SELL"]},
+                "quantity":         {"type": "integer"},
+                "entry_price":      {"type": "number"},
+                "stop_loss_price":  {"type": "number"},
+                "thesis":           {"type": "string", "description": "1-2 sentence trade thesis"},
+                "target_price":     {"type": "number", "description": "Estimated target price for R:R calculation"},
+                "approved":         {"type": "boolean", "default": False},
             },
             "required": ["symbol", "security_id", "transaction_type", "quantity",
                          "entry_price", "stop_loss_price", "thesis"],
@@ -597,7 +665,7 @@ ALL_TOOL_SCHEMAS = [
                 "symbol":      {"type": "string"},
                 "security_id": {"type": "string"},
                 "quantity":    {"type": "integer"},
-                "reason":      {"type": "string", "description": "Why exiting (e.g. 'stop loss hit', 'target reached')"},
+                "reason":      {"type": "string"},
             },
             "required": ["symbol", "security_id", "quantity", "reason"],
         },
@@ -622,18 +690,15 @@ ALL_TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "filename": {
-                    "type": "string",
-                    "enum": ["MARKET.md", "STRATEGY.md"],
-                },
-                "content": {"type": "string", "description": "Full new content of the file"},
+                "filename": {"type": "string", "enum": ["MARKET.md", "STRATEGY.md"]},
+                "content":  {"type": "string"},
             },
             "required": ["filename", "content"],
         },
     },
     {
         "name": "append_journal",
-        "description": "Append a trade entry to JOURNAL.md. Use the standard format: Date | Symbol | Direction | Entry \u20b9 | Exit \u20b9 | Qty | P&L \u20b9 | R multiple.",
+        "description": "Append a trade entry to JOURNAL.md.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -647,29 +712,21 @@ ALL_TOOL_SCHEMAS = [
         "description": (
             "Register a stock for automated intraday price-triggered entry. "
             "The heartbeat checks every 5 minutes and calls place_trade() automatically "
-            "when price is in range and optional RSI/candle conditions are met. "
-            "Use this for WATCH candidates where entry conditions aren't met at 9:35 AM "
-            "but may be met later in the session (e.g. pullback to support, breakout above resistance)."
+            "when price is in range and optional RSI/candle conditions are met."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "symbol":      {"type": "string", "description": "NSE ticker symbol"},
-                "security_id": {"type": "string", "description": "Dhan security ID"},
-                "entry_min":   {"type": "number", "description": "Lower bound of entry price range"},
-                "entry_max":   {"type": "number", "description": "Upper bound of entry price range"},
-                "stop_loss_price": {"type": "number"},
-                "target_price":    {"type": "number"},
-                "quantity":        {"type": "integer"},
-                "thesis":          {"type": "string", "description": "1-2 sentence entry thesis"},
-                "rsi_max": {
-                    "type": "number",
-                    "description": "Optional RSI(14) ceiling on 15-min chart. Entry blocked if RSI exceeds this.",
-                },
-                "candle_close_above": {
-                    "type": "number",
-                    "description": "Optional: only enter if the latest completed 15-min candle closed above this price.",
-                },
+                "symbol":      {"type": "string"},
+                "security_id": {"type": "string"},
+                "entry_min":   {"type": "number"},
+                "entry_max":   {"type": "number"},
+                "stop_loss_price":    {"type": "number"},
+                "target_price":       {"type": "number"},
+                "quantity":           {"type": "integer"},
+                "thesis":             {"type": "string"},
+                "rsi_max":            {"type": "number"},
+                "candle_close_above": {"type": "number"},
             },
             "required": ["symbol", "security_id", "entry_min", "entry_max",
                          "stop_loss_price", "target_price", "quantity", "thesis"],
@@ -677,12 +734,10 @@ ALL_TOOL_SCHEMAS = [
     },
     {
         "name": "remove_from_watchlist",
-        "description": "Remove a stock from the intraday watchlist (e.g. thesis broken, avoid today).",
+        "description": "Remove a stock from the intraday watchlist.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "symbol": {"type": "string", "description": "NSE ticker symbol to remove"},
-            },
+            "properties": {"symbol": {"type": "string"}},
             "required": ["symbol"],
         },
     },
@@ -695,7 +750,6 @@ ALL_TOOL_SCHEMAS = [
                 "index": {
                     "type": "string",
                     "enum": ["NIFTY50", "BANKNIFTY", "FINNIFTY"],
-                    "description": "Index name",
                     "default": "NIFTY50",
                 }
             },
@@ -705,63 +759,47 @@ ALL_TOOL_SCHEMAS = [
     {
         "name": "write_trigger",
         "description": (
-            "Set a monitoring condition that will invoke you (Claude) when met. "
-            "The heartbeat checks all triggers every 5 minutes and calls you with fresh context "
-            "when a condition fires. Use this to set your own mid-session review schedule "
-            "instead of relying on a fixed clock.\n\n"
-            "Trigger types and required fields:\n"
-            "  time             → at: 'HH:MM' (IST, e.g. '10:30')\n"
-            "  price_above      → symbol, threshold\n"
-            "  price_below      → symbol, threshold\n"
-            "  index_above      → symbol (NIFTY50/BANKNIFTY/FINNIFTY), threshold\n"
-            "  index_below      → symbol, threshold\n"
-            "  near_stop        → symbol (open position), buffer_pct (% above SL to review)\n"
-            "  near_target      → symbol (open position), buffer_pct (% below target to review)\n"
-            "  day_pnl_above    → threshold (₹)\n"
-            "  day_pnl_below    → threshold (₹)\n"
-            "  position_pnl_pct → symbol (open position), above_pct (%)\n\n"
-            "Always set expires_at to today at 15:00 IST to prevent stale triggers carrying over."
+            "Set a monitoring condition that invokes Claude when met. "
+            "Heartbeat checks every 5 minutes.\n\n"
+            "Types: time (at), price_above/below (symbol, threshold), "
+            "index_above/below (symbol, threshold), near_stop/near_target (symbol, buffer_pct), "
+            "day_pnl_above/below (threshold), position_pnl_pct (symbol, above_pct).\n\n"
+            "Always set expires_at to today 15:00 IST."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "id":          {"type": "string", "description": "Unique trigger identifier (e.g. 'coalindia_orb', 'nifty_support')"},
-                "type":        {"type": "string", "enum": [
+                "id":         {"type": "string"},
+                "type":       {"type": "string", "enum": [
                     "time", "price_above", "price_below",
                     "index_above", "index_below",
                     "near_stop", "near_target",
                     "day_pnl_above", "day_pnl_below",
                     "position_pnl_pct",
                 ]},
-                "reason":      {"type": "string", "description": "Why you're setting this trigger — context for when it fires"},
-                "expires_at":  {"type": "string", "description": "ISO 8601 datetime. Set to today 15:00 IST."},
-                "symbol":      {"type": "string", "description": "NSE symbol or index name (for price/position/index triggers)"},
-                "threshold":   {"type": "number", "description": "Price or P&L threshold (for price_*, index_*, day_pnl_* triggers)"},
-                "at":          {"type": "string", "description": "Time string 'HH:MM' IST (for time trigger only)"},
-                "buffer_pct":  {"type": "number", "description": "% buffer from SL or target (for near_stop / near_target)"},
-                "above_pct":   {"type": "number", "description": "P&L % threshold (for position_pnl_pct)"},
+                "reason":     {"type": "string"},
+                "expires_at": {"type": "string", "description": "ISO 8601 datetime, today 15:00 IST"},
+                "symbol":     {"type": "string"},
+                "threshold":  {"type": "number"},
+                "at":         {"type": "string", "description": "'HH:MM' IST"},
+                "buffer_pct": {"type": "number"},
+                "above_pct":  {"type": "number"},
             },
             "required": ["id", "type", "reason", "expires_at"],
         },
     },
     {
         "name": "remove_trigger",
-        "description": "Remove a monitoring trigger by id (e.g. thesis broken, no longer relevant).",
+        "description": "Remove a monitoring trigger by id.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Trigger id to remove"},
-            },
+            "properties": {"id": {"type": "string"}},
             "required": ["id"],
         },
     },
     {
         "name": "list_triggers",
         "description": "Return all currently active monitoring triggers.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]

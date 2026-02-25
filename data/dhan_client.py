@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 import tempfile
@@ -8,6 +9,8 @@ import pandas as pd
 import httpx
 from dotenv import load_dotenv
 from dhanhq import dhanhq
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -49,11 +52,23 @@ _INDEX_IDS = {
 }
 
 
+def _is_auth_error(resp: dict) -> bool:
+    """Return True if the response indicates an expired or invalid access token (DH-901)."""
+    if not isinstance(resp, dict) or resp.get("status") != "failure":
+        return False
+    remarks = resp.get("remarks") or {}
+    if isinstance(remarks, dict):
+        return remarks.get("error_code") == "DH-901"
+    data = resp.get("data") or {}
+    if isinstance(data, dict):
+        return data.get("errorCode") == "DH-901"
+    return False
+
+
 class DhanClient:
-    def __init__(self):
-        client_id = os.environ["DHAN_CLIENT_ID"]
-        access_token = os.environ["DHAN_ACCESS_TOKEN"]
-        self.dhan = dhanhq(client_id, access_token)
+    def __init__(self, client_id: str = None, access_token: str = None):
+        self.configured = bool(client_id and access_token)
+        self.dhan = dhanhq(client_id or "unconfigured", access_token or "unconfigured")
         if os.getenv("DHAN_SANDBOX", "false").lower() == "true":
             self.dhan.base_url = SANDBOX_BASE_URL
 
@@ -170,8 +185,11 @@ class DhanClient:
     def get_positions(self) -> list:
         """Get current open positions."""
         resp = self.dhan.get_positions()
-        if isinstance(resp, dict) and "data" in resp:
-            return resp["data"] or []
+        if isinstance(resp, dict):
+            if _is_auth_error(resp):
+                return [{"error": "token_expired", "token_expired": True}]
+            if "data" in resp:
+                return resp["data"] or []
         if isinstance(resp, list):
             return resp
         return []
@@ -187,6 +205,12 @@ class DhanClient:
         """Returns available_balance, used_margin, day_pnl."""
         resp = self.dhan.get_fund_limits()
         if isinstance(resp, dict):
+            if resp.get("status") == "failure":
+                if _is_auth_error(resp):
+                    logger.warning("Dhan token expired for this account")
+                    return {"error": "Dhan access token expired", "token_expired": True}
+                logger.error("get_fund_limits API error: %s", resp)
+                return {"error": str(resp.get("remarks") or resp.get("message") or resp)}
             data = resp.get("data", resp)
             available = float(data.get("availabelBalance", data.get("available_balance", 0)))
             used      = float(data.get("utilizedAmount", data.get("used_margin", 0)))

@@ -7,11 +7,8 @@ Runs every 5 minutes during market hours. Checks:
 3. Watchlist entry triggers (pure Python → place_trade)
 4. TRIGGERS.json soft conditions → invoke Claude only when a condition fires
 
-Position metadata (entry, SL, target) is written to memory/OPEN_POSITIONS.json
+Position metadata (entry, SL, target) is written to memory/{uid}/OPEN_POSITIONS.json
 by place_trade() and cleaned up by exit_position().
-
-Triggers are written to memory/TRIGGERS.json by Claude (via write_trigger tool)
-and cleaned up here as they fire or expire.
 """
 import logging
 from datetime import datetime, timedelta
@@ -23,25 +20,23 @@ import pytz
 from agent.tools import (
     get_positions, get_market_quote, get_historical_data, get_funds,
     exit_position, place_trade, load_watchlist, _save_watchlist,
-    get_index_quote, load_triggers, _save_triggers,
+    get_index_quote, load_triggers, _save_triggers, _load_agent_pnl,
 )
+from agent.user_context import get_user_ctx
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = logging.getLogger(__name__)
 
-OPEN_POSITIONS_PATH = Path("memory/OPEN_POSITIONS.json")
-
-DAILY_LOSS_LIMIT = -500.0  # ₹ — halt all trading if breached
-PROFIT_LOCK_PCT  = 0.04    # exit at +4% from entry
-EOD_EXIT_HOUR    = 15
-EOD_EXIT_MIN     = 10      # 3:10 PM IST — exit before 3:20 MIS auto-square-off
+EOD_EXIT_HOUR = 15
+EOD_EXIT_MIN  = 10   # 3:10 PM IST — exit before 3:20 MIS auto-square-off
 
 
 def load_tracked_positions() -> dict:
     """Load locally tracked position metadata (entry, SL, target)."""
-    if OPEN_POSITIONS_PATH.exists():
+    path = get_user_ctx().memory_dir / "OPEN_POSITIONS.json"
+    if path.exists():
         try:
-            return json.loads(OPEN_POSITIONS_PATH.read_text())
+            return json.loads(path.read_text())
         except Exception:
             pass
     return {}
@@ -157,7 +152,6 @@ def _evaluate_triggers(
             buffer_pct = trigger.get("buffer_pct", 0.5) / 100
             pos = tracked.get(symbol)
             if not pos or symbol not in live_symbols:
-                # Position closed — discard trigger silently
                 logger.debug("Trigger %s: %s not open — discarding", tid, symbol)
                 continue
             ltp = ltp_cache.get(symbol)
@@ -233,7 +227,6 @@ def _evaluate_triggers(
             except Exception as e:
                 logger.error("Trigger %s: agent invocation failed: %s", tid, e)
                 alerts.append(f"TRIGGER [{tid}] ERROR: {e}")
-            # Trigger consumed — do not re-add to remaining
         else:
             remaining.append(trigger)
 
@@ -243,20 +236,41 @@ def _evaluate_triggers(
 
 def run() -> str:
     """
-    Run the deterministic heartbeat.
+    Run the deterministic heartbeat for the current UserContext.
     Returns 'HEARTBEAT_OK' or a description of actions taken / alerts raised.
     """
+    ctx = get_user_ctx()
     now = datetime.now(IST)
     alerts: list[str] = []
-    ltp_cache: dict[str, float] = {}  # shared across sections to avoid duplicate quotes
+    ltp_cache: dict[str, float] = {}
 
-    # ── 1. Daily loss limit ────────────────────────────────────────────────
+    # ── 1. Token expiry check — abort before any trading logic ────────────
     funds = get_funds()
+    if isinstance(funds, dict) and funds.get("token_expired"):
+        alert_flag = ctx.memory_dir / ".token_expired_alerted"
+        last_alert = float(alert_flag.read_text()) if alert_flag.exists() else 0.0
+        if (now.timestamp() - last_alert) > 86400:  # alert at most once per day
+            alert_flag.write_text(str(now.timestamp()))
+            return "TOKEN_EXPIRED: Your Dhan access token has expired. Update it in Settings to resume trading."
+        return "HEARTBEAT_OK"
+
+    # ── 2. Daily loss limit (agent P&L from Dhan positions) ───────────────
+    pnl_data = _load_agent_pnl()
+    tracked_symbols: set[str] = set(pnl_data.get("tracked_symbols", []))
     day_pnl = 0.0
-    if isinstance(funds, dict) and not funds.get("error"):
-        day_pnl = funds.get("day_pnl", 0.0)
-        if day_pnl < DAILY_LOSS_LIMIT:
-            return f"HALT: Daily loss limit breached. day_pnl=₹{day_pnl:.2f}"
+    if tracked_symbols:
+        try:
+            live_for_pnl = get_positions()
+            if live_for_pnl and not (len(live_for_pnl) == 1 and isinstance(live_for_pnl[0], dict) and live_for_pnl[0].get("error")):
+                for p in live_for_pnl:
+                    sym = p.get("tradingSymbol") or p.get("symbol", "")
+                    if sym in tracked_symbols:
+                        day_pnl += float(p.get("realizedProfit", 0) or 0)
+                        day_pnl += float(p.get("unrealizedProfit", 0) or 0)
+        except Exception:
+            pass
+    if day_pnl < ctx.daily_loss_limit:
+        return f"HALT: Daily loss limit breached. agent_pnl=₹{day_pnl:.2f}"
 
     is_eod = (now.hour, now.minute) >= (EOD_EXIT_HOUR, EOD_EXIT_MIN)
 
@@ -294,14 +308,12 @@ def run() -> str:
 
             logger.debug("%s LTP=%.2f entry=%.2f SL=%.2f target=%.2f", symbol, ltp, entry, sl, target)
 
-            # EOD: exit all positions before MIS auto-square-off
             if is_eod:
                 result = exit_position(symbol, sec_id, qty, "MIS EOD exit — 3:10 PM IST")
                 alerts.append(f"EOD exit {symbol} @ ₹{ltp:.2f}")
                 logger.info("EOD exit %s: %s", symbol, result)
                 continue
 
-            # Hard exits — pure Python, no LLM
             if ltp <= sl:
                 result = exit_position(symbol, sec_id, qty, f"Stop loss hit: LTP ₹{ltp:.2f} ≤ SL ₹{sl:.2f}")
                 alerts.append(f"SL hit {symbol}: exit @ ₹{ltp:.2f} (SL ₹{sl:.2f})")
@@ -314,9 +326,9 @@ def run() -> str:
                 logger.info("Target exit %s: %s", symbol, result)
                 continue
 
-            if ltp >= entry * (1 + PROFIT_LOCK_PCT):
-                result = exit_position(symbol, sec_id, qty, f"Profit lock +4%: LTP ₹{ltp:.2f}")
-                alerts.append(f"Profit lock {symbol}: exit @ ₹{ltp:.2f} (+{((ltp/entry)-1)*100:.1f}% from ₹{entry:.2f})")
+            if ltp >= entry * (1 + ctx.profit_lock_pct):
+                result = exit_position(symbol, sec_id, qty, f"Profit lock +{ctx.profit_lock_pct*100:.0f}%: LTP ₹{ltp:.2f}")
+                alerts.append(f"Profit lock {symbol}: exit @ ₹{ltp:.2f} (+{((ltp/entry)-1)*100:.1f}%)")
                 logger.info("Profit lock exit %s: %s", symbol, result)
                 continue
 
@@ -373,7 +385,6 @@ def run() -> str:
             _save_watchlist(watchlist)
 
     # ── 4. Soft triggers → Claude review ──────────────────────────────────
-    # Only evaluate triggers outside EOD window — positions are being exited anyway.
     if not is_eod:
         trigger_alerts = _evaluate_triggers(now, tracked, live_symbols, day_pnl, ltp_cache)
         alerts.extend(trigger_alerts)

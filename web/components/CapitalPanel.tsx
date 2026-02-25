@@ -5,7 +5,12 @@ import clsx from "clsx"
 interface Capital {
   available_balance: number
   used_margin: number
-  day_pnl: number
+}
+
+interface AgentPnl {
+  realized: number
+  unrealized: number
+  total: number
 }
 
 function formatINR(n: number): string {
@@ -17,32 +22,39 @@ function formatINR(n: number): string {
   }).format(n)
 }
 
-export function CapitalPanel({ capital }: { capital: Capital }) {
-  const total = capital.available_balance + capital.used_margin
-  const deployedPct = total > 0 ? (capital.used_margin / total) * 100 : 0
-  const pnlPct = total > 0 ? (capital.day_pnl / total) * 100 : 0
+export function CapitalPanel({ capital, agentPnl, seedCapital, deployedNotional }: { capital: Capital; agentPnl: AgentPnl; seedCapital: number; deployedNotional: number }) {
+  const deployedPct = seedCapital > 0 ? Math.min((deployedNotional / seedCapital) * 100, 100) : 0
+  const pnlPct = seedCapital > 0 ? (agentPnl.total / seedCapital) * 100 : 0
 
   return (
     <div className="col-span-2 grid grid-cols-3 gap-4">
-      {/* Available balance */}
+      {/* Balance */}
       <div className="bg-surface rounded-lg border border-border p-4">
-        <div className="text-text-muted text-xs uppercase tracking-wider mb-1">Available Balance</div>
-        <div className="font-mono text-2xl text-text-primary">{formatINR(capital.available_balance)}</div>
+        <div className="text-text-muted text-xs uppercase tracking-wider mb-1">Agent Capital</div>
+        <div className="font-mono text-2xl text-text-primary">{formatINR(seedCapital)}</div>
+        <div className="text-xs text-text-muted mt-1 font-mono">
+          Account {formatINR(capital.available_balance)}
+        </div>
       </div>
 
-      {/* Day P&L */}
+      {/* Agent P&L */}
       <div className="bg-surface rounded-lg border border-border p-4">
-        <div className="text-text-muted text-xs uppercase tracking-wider mb-1">Day P&L</div>
+        <div className="text-text-muted text-xs uppercase tracking-wider mb-1">Agent P&amp;L</div>
         <div
           className={clsx(
             "font-mono text-2xl",
-            capital.day_pnl >= 0 ? "text-accent-green" : "text-accent-red"
+            agentPnl.total >= 0 ? "text-accent-green" : "text-accent-red"
           )}
         >
-          {formatINR(capital.day_pnl)}
+          {formatINR(agentPnl.total)}
           <span className="text-sm ml-2">
             ({pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%)
           </span>
+        </div>
+        <div className="text-xs text-text-muted mt-1 font-mono space-x-3">
+          <span>Realized {formatINR(agentPnl.realized)}</span>
+          <span>·</span>
+          <span>Open {formatINR(agentPnl.unrealized)}</span>
         </div>
       </div>
 
@@ -57,7 +69,7 @@ export function CapitalPanel({ capital }: { capital: Capital }) {
             />
           </div>
           <div className="text-xs text-text-muted mt-1 font-mono">
-            {formatINR(capital.used_margin)} deployed / {formatINR(capital.available_balance)} free
+            {formatINR(deployedNotional)} deployed / {formatINR(Math.max(seedCapital - deployedNotional, 0))} free
           </div>
         </div>
       </div>

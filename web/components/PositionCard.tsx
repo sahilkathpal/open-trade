@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { motion } from "framer-motion"
 import clsx from "clsx"
+import { useAuth } from "@/lib/auth"
 
 interface Position {
   symbol: string
@@ -24,6 +25,7 @@ function formatINR(n: number): string {
 }
 
 export function PositionCard({ position }: { position: Position }) {
+  const { authFetch } = useAuth()
   const [confirming, setConfirming] = useState(false)
 
   const { symbol, entry_price, current_price, quantity, pnl, stop_loss_price, target_price } = position
@@ -40,7 +42,7 @@ export function PositionCard({ position }: { position: Position }) {
     }
     // actual exit
     try {
-      await fetch(`/api/exit/${symbol}`, { method: "POST" })
+      await authFetch(`/api/exit/${symbol}`, { method: "POST" })
     } catch {
       // handle silently
     }

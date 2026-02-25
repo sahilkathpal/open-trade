@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { motion } from "framer-motion"
 import clsx from "clsx"
+import { useAuth } from "@/lib/auth"
 
 interface ProposalCardProps {
   symbol: string
@@ -36,6 +37,7 @@ export function ProposalCard({
   onApproved,
   onDenied,
 }: ProposalCardProps) {
+  const { authFetch } = useAuth()
   const [loading, setLoading] = useState<"approve" | "deny" | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [dismissed, setDismissed] = useState(false)
@@ -49,7 +51,7 @@ export function ProposalCard({
     setLoading("approve")
     setError(null)
     try {
-      const res = await fetch(`/api/approve/${symbol}`, { method: "POST" })
+      const res = await authFetch(`/api/approve/${symbol}`, { method: "POST" })
       if (!res.ok) throw new Error("Approval failed")
       setDismissed(true)
       setTimeout(onApproved, 500)
@@ -64,7 +66,7 @@ export function ProposalCard({
     setLoading("deny")
     setError(null)
     try {
-      const res = await fetch(`/api/deny/${symbol}`, { method: "POST" })
+      const res = await authFetch(`/api/deny/${symbol}`, { method: "POST" })
       if (!res.ok) throw new Error("Deny failed")
       setDismissed(true)
       setTimeout(onDenied, 500)

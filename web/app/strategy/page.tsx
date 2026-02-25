@@ -1,23 +1,21 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useCallback, useState } from "react"
+import { useAuth } from "@/lib/auth"
 import { MarkdownRenderer } from "@/components/MarkdownRenderer"
+import { StrategyBadge } from "@/components/StrategyBadge"
 
 export default function StrategyPage() {
+  const { authFetch } = useAuth()
   const [content, setContent] = useState<string>("")
   const [lastModified, setLastModified] = useState<string>("")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
-  const [running, setRunning] = useState(false)
 
-  useEffect(() => {
-    fetchStrategy()
-  }, [])
-
-  async function fetchStrategy() {
+  const fetchStrategy = useCallback(async () => {
     try {
       setLoading(true)
-      const res = await fetch("/api/memory/STRATEGY.md")
+      const res = await authFetch("/api/memory/STRATEGY.md")
       if (!res.ok) throw new Error("fetch failed")
       const data = await res.json()
       setContent(data.content)
@@ -28,19 +26,11 @@ export default function StrategyPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [authFetch])
 
-  async function runEod() {
-    setRunning(true)
-    try {
-      await fetch("/api/run/eod", { method: "POST" })
-      setTimeout(fetchStrategy, 3000)
-    } catch {
-      // ignore
-    } finally {
-      setRunning(false)
-    }
-  }
+  useEffect(() => {
+    fetchStrategy()
+  }, [fetchStrategy])
 
   if (loading) return <div className="text-text-muted text-center py-12">Loading strategy...</div>
   if (error) {
@@ -52,24 +42,33 @@ export default function StrategyPage() {
     )
   }
 
+  if (!content.trim()) {
+    return (
+      <div className="max-w-4xl mx-auto">
+        <div className="flex items-center gap-3 mb-6">
+          <h1 className="text-xl font-semibold text-text-primary">Strategy</h1>
+          <StrategyBadge />
+        </div>
+        <div className="bg-surface rounded-lg border border-border p-12 text-center">
+          <p className="text-text-muted">No strategy notes yet.</p>
+          <p className="text-text-muted text-sm mt-1">The agent builds this over time after each EOD session.</p>
+        </div>
+      </div>
+    )
+  }
+
   const modifiedStr = lastModified
     ? new Date(lastModified).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
-    : "Unknown"
+    : null
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
+      <div>
+        <div className="flex items-center gap-3">
           <h1 className="text-xl font-semibold text-text-primary">Strategy</h1>
-          <p className="text-text-muted text-sm">Last updated: {modifiedStr}</p>
+          <StrategyBadge />
         </div>
-        <button
-          onClick={runEod}
-          disabled={running}
-          className="px-4 py-2 rounded-md bg-accent-amber/20 text-accent-amber text-sm font-medium hover:bg-accent-amber/30 transition-colors disabled:opacity-50"
-        >
-          {running ? "Running..." : "Run EOD"}
-        </button>
+        {modifiedStr && <p className="text-text-muted text-sm">Last updated: {modifiedStr}</p>}
       </div>
 
       <div className="bg-surface rounded-lg border border-border p-6">
