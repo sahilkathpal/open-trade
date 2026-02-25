@@ -6,7 +6,7 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from agent.runner import run
-from agent.tools import pending_approvals, _save_pending, load_watchlist, _save_watchlist
+from agent.tools import pending_approvals, _save_pending, load_watchlist, _save_watchlist, _save_triggers
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +37,11 @@ def _is_market_open() -> bool:
 async def run_premarket():
     """8:45 AM IST — deep pre-market analysis."""
     logger.info("Running pre-market analysis...")
-    # Clear stale proposals and watchlist from previous day
+    # Clear stale proposals, watchlist, and triggers from previous day
     pending_approvals.clear()
     _save_pending()
     _save_watchlist({})
+    _save_triggers([])
     try:
         result = await asyncio.get_event_loop().run_in_executor(None, lambda: run("premarket"))
         if _send_telegram:
@@ -84,32 +85,6 @@ async def run_heartbeat():
         logger.error(f"Heartbeat failed: {e}", exc_info=True)
         if _send_telegram:
             await _send_telegram(f"Heartbeat error: {e}")
-
-
-async def run_midmorning():
-    """10:30 AM IST — ORB and VWAP reclaim scan after first hour settles."""
-    logger.info("Running mid-morning scan...")
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(None, lambda: run("midmorning"))
-        if _send_telegram:
-            await _send_telegram(f"Mid-morning scan\n\n{result[:1000]}")
-    except Exception as e:
-        logger.error(f"Mid-morning job failed: {e}", exc_info=True)
-        if _send_telegram:
-            await _send_telegram(f"Mid-morning job failed: {e}")
-
-
-async def run_midday():
-    """12:30 PM IST — second-leg and flag breakout scan."""
-    logger.info("Running midday scan...")
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(None, lambda: run("midday"))
-        if _send_telegram:
-            await _send_telegram(f"Midday scan\n\n{result[:1000]}")
-    except Exception as e:
-        logger.error(f"Midday job failed: {e}", exc_info=True)
-        if _send_telegram:
-            await _send_telegram(f"Midday job failed: {e}")
 
 
 async def clear_proposals():
@@ -159,28 +134,6 @@ def setup_scheduler():
         hour=9,
         minute=35,
         id="execution",
-        replace_existing=True,
-    )
-
-    # Mid-morning scan: 10:30 AM IST Mon-Fri (ORB + VWAP reclaim)
-    scheduler.add_job(
-        run_midmorning,
-        "cron",
-        day_of_week="mon-fri",
-        hour=10,
-        minute=30,
-        id="midmorning",
-        replace_existing=True,
-    )
-
-    # Midday scan: 12:30 PM IST Mon-Fri (second legs, flag breakouts)
-    scheduler.add_job(
-        run_midday,
-        "cron",
-        day_of_week="mon-fri",
-        hour=12,
-        minute=30,
-        id="midday",
         replace_existing=True,
     )
 

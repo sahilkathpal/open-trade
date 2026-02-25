@@ -10,6 +10,7 @@ import { ActivityFeed } from "@/components/ActivityFeed"
 import { MISCountdown } from "@/components/MISCountdown"
 import { TokenUsageCard } from "@/components/TokenUsageCard"
 import { WatchlistCard } from "@/components/WatchlistCard"
+import { TriggerCard } from "@/components/TriggerCard"
 
 interface TokenUsage {
   input_tokens: number
@@ -57,6 +58,17 @@ interface AppState {
     thesis: string
     rsi_max?: number
     candle_close_above?: number
+  }>
+  triggers: Array<{
+    id: string
+    type: string
+    reason: string
+    expires_at: string
+    symbol?: string
+    threshold?: number
+    at?: string
+    buffer_pct?: number
+    above_pct?: number
   }>
 }
 
@@ -173,6 +185,20 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* Row 2c: Triggers */}
+        {state.triggers && state.triggers.length > 0 && (
+          <div className="space-y-2">
+            <h2 className="text-sm font-medium text-text-muted uppercase tracking-wider">
+              Monitoring Triggers ({state.triggers.length})
+            </h2>
+            <div className="grid grid-cols-2 gap-2">
+              {state.triggers.map((t) => (
+                <TriggerCard key={t.id} trigger={t} />
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Row 3: Positions + Activity + Token Usage */}
         <div className="grid grid-cols-3 gap-4">
           <div>
@@ -216,8 +242,6 @@ export default function DashboardPage() {
                     const labels: Record<string, string> = {
                       premarket: "Pre-market screening",
                       execution: "Execution planning",
-                      midmorning: "Mid-morning scan",
-                      midday: "Midday scan",
                       heartbeat: "Heartbeat",
                       clear_proposals: "Clear proposals",
                       eod: "EOD report",

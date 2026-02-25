@@ -41,6 +41,13 @@ def _load_instruments() -> pd.DataFrame:
 
 SANDBOX_BASE_URL = "https://sandbox.dhan.co/v2"
 
+# Dhan NSE_IDX security IDs for major indices
+_INDEX_IDS = {
+    "NIFTY50":   13,
+    "BANKNIFTY": 25,
+    "FINNIFTY":  27,
+}
+
 
 class DhanClient:
     def __init__(self):
@@ -168,6 +175,13 @@ class DhanClient:
         if isinstance(resp, list):
             return resp
         return []
+
+    def get_index_quote(self, index: str = "NIFTY50") -> dict:
+        """Get LTP for a NSE index. index: 'NIFTY50' | 'BANKNIFTY' | 'FINNIFTY'"""
+        sec_id = _INDEX_IDS.get(index.upper())
+        if sec_id is None:
+            return {"error": f"Unknown index: {index}. Supported: {list(_INDEX_IDS.keys())}"}
+        return self.dhan.quote_data({"NSE_IDX": [sec_id]})
 
     def get_funds(self) -> dict:
         """Returns available_balance, used_margin, day_pnl."""

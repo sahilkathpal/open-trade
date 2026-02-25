@@ -69,53 +69,37 @@ This is the execution planning job — set real entry levels using today's live 
 3. Update MARKET.md to reflect outcomes (PLACED / WATCHING / INVALIDATED) and actual entry parameters.
 
 Be honest. If the first candle doesn't confirm an immediate entry, use add_to_watchlist() rather
-than forcing a trade — there will be other opportunities in the session.""",
+than forcing a trade — there will be other opportunities in the session.
 
-    "midmorning": """It is 10:30 AM IST. The first hour of trading has settled.
-This is a lightweight mid-session scan — not a full re-screen. Be selective. "No setup" is a valid outcome.
+Before finishing, set monitoring triggers with write_trigger() for the rest of the session.
+For every placed or watched position, consider:
+- near_stop: buffer_pct 0.5 — review before the hard stop is hit
+- near_target: buffer_pct 0.5 — review whether to trail or exit at target
+- index_below: if Nifty breaking a support level would invalidate your thesis, set it
+- time: only if there is a specific mid-session setup worth checking at a particular time
+  (e.g. "ORB follow-through likely at 10:30" or "second leg after consolidation at 12:00")
+  — do NOT set time triggers just to have activity. If today looks quiet, set none.
+Always set expires_at to today at 15:00 IST.""",
 
-Context: MARKET.md shows what was identified this morning and the current state (PLACED / WATCHING / INVALIDATED).
+    "trigger": """A monitoring trigger you set earlier has just fired.
+The specific condition and your original note are below (appended after this prompt).
 
-Your job:
-1. Call get_positions() and get_funds() to know current exposure and available capital.
-   - If 2 positions are already open or daily P&L is near -₹500, return immediately — no new trades.
-2. Check the watchlist (read_memory WATCHLIST.json if it exists) — are any of today's setups still pending?
-3. Scan for mid-session setups on quality large-cap NSE stocks (Nifty 50 / Nifty Next 50):
-   - Opening Range Breakout (ORB): stock broke above the 9:15–9:45 AM range on volume.
-     get_historical_data(symbol, interval="15", days=1) — check if a candle closed above the opening range high.
-   - VWAP reclaim: stock was below VWAP at open, has now reclaimed it with a bullish candle and volume.
-   - Only check 3–5 stocks maximum. Prefer sectors with tailwinds from today's news (see MARKET.md context).
-4. For any valid setup:
-   - Verify fundamentals are acceptable (PE < 30, positive margins) — use get_fundamentals() only if unsure.
-   - Entry must be current price or tight limit — do NOT chase a move already up >2% from the ORB level.
-   - Stop loss: below the ORB low or VWAP, 1.5–2.5% below entry.
-   - Target: minimum 2R. Given EOD exit at 3:10 PM (~2.5 hours away), target must be realistic.
-   - Call add_to_watchlist() if entry conditions aren't met yet but setup is developing.
-   - Call place_trade() if price is at entry right now.
-5. Update MARKET.md: append a "Mid-morning scan" section with findings (even if nothing was found).
+Review the situation with fresh data and make a decision. Steps:
+1. Call get_market_quote() for any symbols in the trigger.
+2. Call get_positions() and get_funds() to confirm current exposure and P&L.
+3. Call get_historical_data() if candle structure or indicators are relevant.
+4. Decide and act — exactly one of:
+   - exit_position(): setup has broken down, exit before stop is hit
+   - place_trade(): entry trigger, conditions confirmed
+   - add_to_watchlist(): entry close but not quite there yet
+   - write_trigger(): set a tighter follow-up trigger after reviewing
+   - No action: after looking at the data, no action is warranted — note why
+5. Update MARKET.md with what you found and decided (1-2 lines is enough).
 
-Be honest and brief. Most days this scan will find nothing — that is the correct and expected outcome.""",
-
-    "midday": """It is 12:30 PM IST. Post-lunch scan.
-This is a narrow opportunistic check — not a full re-screen. "No setup" is the expected outcome most days.
-
-Context: MARKET.md shows the full day's activity so far.
-
-Your job:
-1. Call get_positions() and get_funds() first.
-   - If 2 positions are already open, or daily P&L is near -₹500, or available capital is low: stop here.
-2. Look for second-leg setups on stocks that had strong morning moves:
-   - Flag/consolidation breakout: strong move in first hour, consolidation for 1–2 hours, now breaking out again on volume.
-   - Sector follow-through: if a sector was strong this morning, are laggards in that sector now catching up?
-   - get_historical_data(symbol, interval="15", days=1) to check candle structure and VWAP position.
-3. Only check stocks with a clear reason to look at them (from MARKET.md context or this morning's move).
-   Do NOT screen fresh stocks with no morning context — that is pre-market's job.
-4. Time constraint: EOD exit is at 3:10 PM — entries here have ~2.5 hours. Target must be achievable.
-   Avoid entries where the target requires >3% move in 2.5 hours unless there is very strong momentum.
-5. For any valid setup: add_to_watchlist() or place_trade() as appropriate.
-6. Update MARKET.md: append a "Midday scan" section. Note what was checked and why you acted or passed.
-
-Bias toward passing. A forced midday trade is worse than no trade.""",
+Constraints:
+- Do not open new positions if 2 are already open or day P&L ≤ -₹400.
+- Do not chase — if the move already happened before you reviewed, note it and pass.
+- Be brief. Most trigger reviews resolve in 3-4 tool calls.""",
 
     "eod": """End of day review. Please:
 
@@ -190,11 +174,10 @@ def run(job_type: str, extra_prompt: str = "") -> str:
     soul = soul_path.read_text() if soul_path.exists() else "You are an autonomous trading agent."
 
     context_files = {
-        "premarket":  ["memory/STRATEGY.md"],
-        "execution":  ["memory/MARKET.md"],
-        "midmorning": ["memory/MARKET.md", "memory/STRATEGY.md"],
-        "midday":     ["memory/MARKET.md"],
-        "eod":        ["memory/MARKET.md", "memory/JOURNAL.md"],
+        "premarket": ["memory/STRATEGY.md"],
+        "execution": ["memory/MARKET.md"],
+        "trigger":   ["memory/MARKET.md"],
+        "eod":       ["memory/MARKET.md", "memory/JOURNAL.md"],
     }
 
     memory_parts = []

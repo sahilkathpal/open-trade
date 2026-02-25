@@ -19,6 +19,7 @@ _risk = RiskGuard(seed_capital=float(os.getenv("SEED_CAPITAL", "10000")))
 _PENDING_PATH = Path("memory/PENDING.json")
 _OPEN_POSITIONS_PATH = Path("memory/OPEN_POSITIONS.json")
 _WATCHLIST_PATH = Path("memory/WATCHLIST.json")
+_TRIGGERS_PATH = Path("memory/TRIGGERS.json")
 
 
 def load_watchlist() -> dict:
@@ -338,6 +339,84 @@ def remove_from_watchlist(symbol: str) -> dict:
     return {"status": "not_found", "symbol": symbol}
 
 
+def get_index_quote(index: str = "NIFTY50") -> dict:
+    """Get LTP for a NSE index (NIFTY50, BANKNIFTY, FINNIFTY)."""
+    try:
+        return _dhan.get_index_quote(index)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def load_triggers() -> list:
+    if _TRIGGERS_PATH.exists():
+        try:
+            data = json.loads(_TRIGGERS_PATH.read_text())
+            return data if isinstance(data, list) else []
+        except Exception:
+            pass
+    return []
+
+
+def _save_triggers(triggers: list):
+    _TRIGGERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _TRIGGERS_PATH.write_text(json.dumps(triggers, indent=2, default=str))
+
+
+def write_trigger(
+    id: str,
+    type: str,
+    reason: str,
+    expires_at: str,
+    symbol: str = None,
+    threshold: float = None,
+    at: str = None,
+    buffer_pct: float = None,
+    above_pct: float = None,
+) -> dict:
+    """
+    Set a monitoring trigger. The heartbeat evaluates all triggers every 5 minutes
+    and invokes Claude when a condition is met.
+
+    type + required fields:
+      time              → at (e.g. "10:30")
+      price_above       → symbol, threshold
+      price_below       → symbol, threshold
+      index_above       → symbol (NIFTY50/BANKNIFTY/FINNIFTY), threshold
+      index_below       → symbol, threshold
+      near_stop         → symbol (open position), buffer_pct (% above SL to fire)
+      near_target       → symbol (open position), buffer_pct (% below target to fire)
+      day_pnl_above     → threshold (₹)
+      day_pnl_below     → threshold (₹)
+      position_pnl_pct  → symbol (open position), above_pct (%)
+    """
+    triggers = load_triggers()
+    triggers = [t for t in triggers if t.get("id") != id]  # replace if exists
+    trigger = {"id": id, "type": type, "reason": reason, "expires_at": expires_at}
+    if symbol is not None:    trigger["symbol"]     = symbol
+    if threshold is not None: trigger["threshold"]   = threshold
+    if at is not None:        trigger["at"]          = at
+    if buffer_pct is not None: trigger["buffer_pct"] = buffer_pct
+    if above_pct is not None: trigger["above_pct"]   = above_pct
+    triggers.append(trigger)
+    _save_triggers(triggers)
+    return {"status": "ok", "trigger_id": id, "type": type}
+
+
+def remove_trigger(id: str) -> dict:
+    """Remove a trigger by id (e.g. after deciding it's no longer relevant)."""
+    triggers = load_triggers()
+    before = len(triggers)
+    triggers = [t for t in triggers if t.get("id") != id]
+    _save_triggers(triggers)
+    removed = len(triggers) < before
+    return {"status": "removed" if removed else "not_found", "trigger_id": id}
+
+
+def list_triggers() -> list:
+    """Return all active triggers."""
+    return load_triggers()
+
+
 def read_memory(filename: str) -> str:
     if filename not in ALLOWED_READ:
         return f"Error: {filename} not in allowed list {ALLOWED_READ}"
@@ -372,10 +451,14 @@ TOOL_FUNCTIONS = {
     "fetch_news":            fetch_news,
     "get_positions":         get_positions,
     "get_funds":             get_funds,
+    "get_index_quote":       get_index_quote,
     "place_trade":           place_trade,
     "exit_position":         exit_position,
     "add_to_watchlist":      add_to_watchlist,
     "remove_from_watchlist": remove_from_watchlist,
+    "write_trigger":         write_trigger,
+    "remove_trigger":        remove_trigger,
+    "list_triggers":         list_triggers,
     "read_memory":           read_memory,
     "write_memory":          write_memory,
     "append_journal":        append_journal,
@@ -601,6 +684,84 @@ ALL_TOOL_SCHEMAS = [
                 "symbol": {"type": "string", "description": "NSE ticker symbol to remove"},
             },
             "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_index_quote",
+        "description": "Get the current LTP for a major NSE index (NIFTY50, BANKNIFTY, or FINNIFTY).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "string",
+                    "enum": ["NIFTY50", "BANKNIFTY", "FINNIFTY"],
+                    "description": "Index name",
+                    "default": "NIFTY50",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "write_trigger",
+        "description": (
+            "Set a monitoring condition that will invoke you (Claude) when met. "
+            "The heartbeat checks all triggers every 5 minutes and calls you with fresh context "
+            "when a condition fires. Use this to set your own mid-session review schedule "
+            "instead of relying on a fixed clock.\n\n"
+            "Trigger types and required fields:\n"
+            "  time             → at: 'HH:MM' (IST, e.g. '10:30')\n"
+            "  price_above      → symbol, threshold\n"
+            "  price_below      → symbol, threshold\n"
+            "  index_above      → symbol (NIFTY50/BANKNIFTY/FINNIFTY), threshold\n"
+            "  index_below      → symbol, threshold\n"
+            "  near_stop        → symbol (open position), buffer_pct (% above SL to review)\n"
+            "  near_target      → symbol (open position), buffer_pct (% below target to review)\n"
+            "  day_pnl_above    → threshold (₹)\n"
+            "  day_pnl_below    → threshold (₹)\n"
+            "  position_pnl_pct → symbol (open position), above_pct (%)\n\n"
+            "Always set expires_at to today at 15:00 IST to prevent stale triggers carrying over."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id":          {"type": "string", "description": "Unique trigger identifier (e.g. 'coalindia_orb', 'nifty_support')"},
+                "type":        {"type": "string", "enum": [
+                    "time", "price_above", "price_below",
+                    "index_above", "index_below",
+                    "near_stop", "near_target",
+                    "day_pnl_above", "day_pnl_below",
+                    "position_pnl_pct",
+                ]},
+                "reason":      {"type": "string", "description": "Why you're setting this trigger — context for when it fires"},
+                "expires_at":  {"type": "string", "description": "ISO 8601 datetime. Set to today 15:00 IST."},
+                "symbol":      {"type": "string", "description": "NSE symbol or index name (for price/position/index triggers)"},
+                "threshold":   {"type": "number", "description": "Price or P&L threshold (for price_*, index_*, day_pnl_* triggers)"},
+                "at":          {"type": "string", "description": "Time string 'HH:MM' IST (for time trigger only)"},
+                "buffer_pct":  {"type": "number", "description": "% buffer from SL or target (for near_stop / near_target)"},
+                "above_pct":   {"type": "number", "description": "P&L % threshold (for position_pnl_pct)"},
+            },
+            "required": ["id", "type", "reason", "expires_at"],
+        },
+    },
+    {
+        "name": "remove_trigger",
+        "description": "Remove a monitoring trigger by id (e.g. thesis broken, no longer relevant).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Trigger id to remove"},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "list_triggers",
+        "description": "Return all currently active monitoring triggers.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
         },
     },
 ]
