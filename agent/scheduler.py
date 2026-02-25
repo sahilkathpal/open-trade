@@ -64,23 +64,25 @@ async def run_execution():
 
 
 async def run_heartbeat():
-    """Every 5 minutes — position monitoring during market hours."""
+    """Every 5 minutes — position monitoring during market hours. Pure Python, no LLM."""
     if not _is_market_open():
-        return  # Silent skip — no tokens consumed outside trading hours
+        return  # Silent skip outside trading hours
 
     logger.debug("Running heartbeat...")
     try:
-        result = await asyncio.get_event_loop().run_in_executor(None, lambda: run("heartbeat"))
+        from agent.heartbeat import run as heartbeat_run
+        result = await asyncio.get_event_loop().run_in_executor(None, heartbeat_run)
         if result.strip() == "HEARTBEAT_OK":
             logger.debug("Heartbeat OK")
             return
-        # Non-OK result means something needs attention
+        # Non-OK means an action was taken (exit, SL hit, halt) — notify
+        logger.info("Heartbeat action: %s", result)
         if _send_telegram:
-            await _send_telegram(f"Heartbeat Alert\n\n{result}")
+            await _send_telegram(f"Heartbeat\n\n{result}")
     except Exception as e:
-        logger.error(f"Heartbeat job failed: {e}", exc_info=True)
+        logger.error(f"Heartbeat failed: {e}", exc_info=True)
         if _send_telegram:
-            await _send_telegram(f"Heartbeat failed: {e}")
+            await _send_telegram(f"Heartbeat error: {e}")
 
 
 async def clear_proposals():

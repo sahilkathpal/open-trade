@@ -17,6 +17,21 @@ _risk = RiskGuard(seed_capital=float(os.getenv("SEED_CAPITAL", "10000")))
 # key: symbol, value: full trade params dict
 # Persisted to memory/PENDING.json so proposals survive process restarts
 _PENDING_PATH = Path("memory/PENDING.json")
+_OPEN_POSITIONS_PATH = Path("memory/OPEN_POSITIONS.json")
+
+
+def _load_open_positions() -> dict:
+    if _OPEN_POSITIONS_PATH.exists():
+        try:
+            return json.loads(_OPEN_POSITIONS_PATH.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_open_positions(data: dict):
+    _OPEN_POSITIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _OPEN_POSITIONS_PATH.write_text(json.dumps(data, indent=2))
 
 
 def _load_pending() -> dict[str, dict]:
@@ -220,6 +235,17 @@ def place_trade(
         trigger_price=round(stop_loss_price * 1.001, 2),
     )
 
+    # Track locally so the deterministic heartbeat knows SL/target/entry
+    open_positions = _load_open_positions()
+    open_positions[symbol] = {
+        "security_id":    security_id,
+        "entry_price":    entry_price,
+        "stop_loss_price": stop_loss_price,
+        "target_price":   target_price,
+        "quantity":       quantity,
+    }
+    _save_open_positions(open_positions)
+
     return {
         "status":      "placed",
         "symbol":      symbol,
@@ -238,6 +264,10 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> 
             product_type="INTRA",
             price=0,
         )
+        # Remove from local position tracker
+        open_positions = _load_open_positions()
+        open_positions.pop(symbol, None)
+        _save_open_positions(open_positions)
         return {"status": "exit_placed", "symbol": symbol, "reason": reason, "order": resp}
     except Exception as e:
         return {"error": str(e)}

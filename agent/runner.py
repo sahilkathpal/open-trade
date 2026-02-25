@@ -64,22 +64,6 @@ This is the execution planning job — set real entry levels using today's live 
 
 Be honest. If the first candle doesn't confirm, skip the trade — there will be other days.""",
 
-    "heartbeat": """Run the heartbeat checklist from HEARTBEAT.md.
-
-Key checks:
-1. Are market hours active (9:15-15:30 IST weekday)? If not, respond HEARTBEAT_OK immediately.
-2. Check open positions: call get_positions() + get_market_quote() for held symbols.
-   - Price ≤ stop loss? → exit_position immediately.
-   - Up >4% intraday? → evaluate partial exit.
-   - Time 15:10–15:20 IST? → exit_position for ALL open positions. Reason: "MIS EOD exit".
-3. Check daily P&L: call get_funds(). day_pnl < -₹500? → halt and alert, no new trades.
-4. Check WATCH candidates from MARKET.md: call get_market_quote() for any symbol still marked WATCH.
-   - If price has reached the entry zone from MARKET.md → call place_trade() to propose it.
-   - Do NOT re-analyse — trust the thesis. Only check if price is at the level.
-   - If price is nowhere near the entry zone, skip silently.
-
-If nothing triggered: respond with exactly: HEARTBEAT_OK""",
-
     "eod": """End of day review. Please:
 
 1. Read MARKET.md (today's canvas) and JOURNAL.md (trade history).
@@ -155,7 +139,6 @@ def run(job_type: str, extra_prompt: str = "") -> str:
     context_files = {
         "premarket": ["memory/STRATEGY.md"],
         "execution": ["memory/MARKET.md"],
-        "heartbeat": ["memory/HEARTBEAT.md", "memory/MARKET.md"],
         "eod":       ["memory/MARKET.md", "memory/JOURNAL.md"],
     }
 
