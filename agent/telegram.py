@@ -22,6 +22,26 @@ TELEGRAM_CHAT_ID      = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))
 TELEGRAM_BOT_USERNAME = os.environ.get("TELEGRAM_BOT_USERNAME", "")
 
 _app = None
+_loop = None
+
+
+def set_event_loop(loop):
+    """Register the main event loop so sync code can schedule async sends."""
+    global _loop
+    _loop = loop
+
+
+def notify_proposal_sync(text: str, chat_id: int = None):
+    """
+    Fire-and-forget Telegram send from synchronous (threaded) code.
+    Safe to call from tools.py / heartbeat.py without awaiting.
+    """
+    if not _loop or not _app:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(send_message(text, chat_id=chat_id), _loop)
+    except Exception as e:
+        logger.warning("notify_proposal_sync failed: %s", e)
 
 
 _COMMANDS = [

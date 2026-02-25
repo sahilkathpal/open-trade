@@ -295,13 +295,23 @@ def place_trade(
             "target_price": target_price,
         }
         save_pending_approvals(pending)
+        try:
+            from agent.telegram import notify_proposal_sync
+            rr = round((target_price - entry_price) / (entry_price - stop_loss_price), 1) if entry_price != stop_loss_price else 0
+            msg = (
+                f"New proposal: {transaction_type} {symbol}\n\n"
+                f"Entry  ₹{entry_price:.2f} | Qty {quantity}\n"
+                f"SL     ₹{stop_loss_price:.2f}\n"
+                f"Target ₹{target_price:.2f} | R:R {rr}:1\n\n"
+                f"{thesis[:300]}\n\n"
+                f"Reply: approve {symbol}  or  deny {symbol}"
+            )
+            notify_proposal_sync(msg, chat_id=ctx.telegram_chat_id)
+        except Exception:
+            pass
         return {
             "status": "pending_approval",
             "proposal": proposal,
-            "instruction": (
-                "Send this proposal to the user via Telegram notification. "
-                f"Call place_trade again with approved=True when they confirm symbol={symbol}."
-            ),
         }
 
     # 3. Emit to activity feed

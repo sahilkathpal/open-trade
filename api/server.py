@@ -22,6 +22,8 @@ async def lifespan(app: FastAPI):
     init_firebase()
 
     from agent.scheduler import setup_scheduler, set_telegram_sender
+    from agent.telegram import set_event_loop
+    set_event_loop(asyncio.get_event_loop())
 
     sched = setup_scheduler()
     sched.start()
