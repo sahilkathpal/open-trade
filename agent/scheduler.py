@@ -6,7 +6,7 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from agent.runner import run
-from agent.tools import pending_approvals, _save_pending
+from agent.tools import pending_approvals, _save_pending, load_watchlist, _save_watchlist
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +37,10 @@ def _is_market_open() -> bool:
 async def run_premarket():
     """8:45 AM IST — deep pre-market analysis."""
     logger.info("Running pre-market analysis...")
-    # Clear any stale proposals from previous day before generating new ones
+    # Clear stale proposals and watchlist from previous day
     pending_approvals.clear()
     _save_pending()
+    _save_watchlist({})
     try:
         result = await asyncio.get_event_loop().run_in_executor(None, lambda: run("premarket"))
         if _send_telegram:

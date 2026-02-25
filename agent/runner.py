@@ -53,16 +53,23 @@ This is the execution planning job — set real entry levels using today's live 
       - Did it close bullish (close > open)?
       - Was volume above average (check avg_volume vs first candle volume)?
       - Is the current price at a reasonable entry (not gapped >1.5% past a logical level)?
-   d. If the setup is valid:
+   d. If the setup is valid and price is at entry now:
       - Set entry price: current price or a tight limit (not chasing a gap).
       - Set stop loss: below first candle low, or below VWAP — must be 1.5–2.5% below entry.
       - Set target: minimum 2R from entry.
       - Call place_trade() to propose the trade.
-   e. If the setup is invalid (weak candle, low volume, gapped too far, thesis broken):
+   e. If the setup has potential but entry conditions aren't met yet (RSI overbought, price
+      hasn't pulled back to support, waiting for breakout confirmation):
+      - Call add_to_watchlist() with the exact entry range, stop loss, target, quantity,
+        and any technical conditions (rsi_max, candle_close_above).
+      - The heartbeat will monitor and trigger place_trade() automatically when conditions are met.
+      - Mark candidate as WATCH in MARKET.md with the entry range noted.
+   f. If the setup is invalid (weak candle, low volume, gapped too far, thesis broken):
       - Note reason and mark candidate INVALIDATED in MARKET.md.
-3. Update MARKET.md to reflect outcomes (PROPOSED / INVALIDATED) and actual entry parameters.
+3. Update MARKET.md to reflect outcomes (PLACED / WATCHING / INVALIDATED) and actual entry parameters.
 
-Be honest. If the first candle doesn't confirm, skip the trade — there will be other days.""",
+Be honest. If the first candle doesn't confirm an immediate entry, use add_to_watchlist() rather
+than forcing a trade — there will be other opportunities in the session.""",
 
     "eod": """End of day review. Please:
 

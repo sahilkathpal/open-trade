@@ -18,6 +18,21 @@ _risk = RiskGuard(seed_capital=float(os.getenv("SEED_CAPITAL", "10000")))
 # Persisted to memory/PENDING.json so proposals survive process restarts
 _PENDING_PATH = Path("memory/PENDING.json")
 _OPEN_POSITIONS_PATH = Path("memory/OPEN_POSITIONS.json")
+_WATCHLIST_PATH = Path("memory/WATCHLIST.json")
+
+
+def load_watchlist() -> dict:
+    if _WATCHLIST_PATH.exists():
+        try:
+            return json.loads(_WATCHLIST_PATH.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_watchlist(data: dict):
+    _WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _WATCHLIST_PATH.write_text(json.dumps(data, indent=2))
 
 
 def _load_open_positions() -> dict:
@@ -284,6 +299,45 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> 
         return {"error": str(e)}
 
 
+def add_to_watchlist(
+    symbol: str,
+    security_id: str,
+    entry_min: float,
+    entry_max: float,
+    stop_loss_price: float,
+    target_price: float,
+    quantity: int,
+    thesis: str,
+    rsi_max: float = None,
+    candle_close_above: float = None,
+) -> dict:
+    """Register a stock for price-triggered intraday entry."""
+    watchlist = load_watchlist()
+    watchlist[symbol] = {
+        "security_id":       security_id,
+        "entry_min":         entry_min,
+        "entry_max":         entry_max,
+        "stop_loss_price":   stop_loss_price,
+        "target_price":      target_price,
+        "quantity":          quantity,
+        "thesis":            thesis,
+        "rsi_max":           rsi_max,
+        "candle_close_above": candle_close_above,
+    }
+    _save_watchlist(watchlist)
+    return {"status": "added", "symbol": symbol, "entry_range": f"₹{entry_min}–₹{entry_max}"}
+
+
+def remove_from_watchlist(symbol: str) -> dict:
+    """Remove a stock from the intraday watchlist."""
+    watchlist = load_watchlist()
+    if symbol in watchlist:
+        watchlist.pop(symbol)
+        _save_watchlist(watchlist)
+        return {"status": "removed", "symbol": symbol}
+    return {"status": "not_found", "symbol": symbol}
+
+
 def read_memory(filename: str) -> str:
     if filename not in ALLOWED_READ:
         return f"Error: {filename} not in allowed list {ALLOWED_READ}"
@@ -312,17 +366,19 @@ def append_journal(entry: str) -> dict:
 
 # ── tool executor ─────────────────────────────────────────────────────────────
 TOOL_FUNCTIONS = {
-    "get_market_quote":    get_market_quote,
-    "get_historical_data": get_historical_data,
-    "get_fundamentals":    get_fundamentals,
-    "fetch_news":          fetch_news,
-    "get_positions":       get_positions,
-    "get_funds":           get_funds,
-    "place_trade":         place_trade,
-    "exit_position":       exit_position,
-    "read_memory":         read_memory,
-    "write_memory":        write_memory,
-    "append_journal":      append_journal,
+    "get_market_quote":      get_market_quote,
+    "get_historical_data":   get_historical_data,
+    "get_fundamentals":      get_fundamentals,
+    "fetch_news":            fetch_news,
+    "get_positions":         get_positions,
+    "get_funds":             get_funds,
+    "place_trade":           place_trade,
+    "exit_position":         exit_position,
+    "add_to_watchlist":      add_to_watchlist,
+    "remove_from_watchlist": remove_from_watchlist,
+    "read_memory":           read_memory,
+    "write_memory":          write_memory,
+    "append_journal":        append_journal,
 }
 
 
@@ -501,6 +557,50 @@ ALL_TOOL_SCHEMAS = [
                 "entry": {"type": "string", "description": "Formatted journal entry to append"}
             },
             "required": ["entry"],
+        },
+    },
+    {
+        "name": "add_to_watchlist",
+        "description": (
+            "Register a stock for automated intraday price-triggered entry. "
+            "The heartbeat checks every 5 minutes and calls place_trade() automatically "
+            "when price is in range and optional RSI/candle conditions are met. "
+            "Use this for WATCH candidates where entry conditions aren't met at 9:35 AM "
+            "but may be met later in the session (e.g. pullback to support, breakout above resistance)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol":      {"type": "string", "description": "NSE ticker symbol"},
+                "security_id": {"type": "string", "description": "Dhan security ID"},
+                "entry_min":   {"type": "number", "description": "Lower bound of entry price range"},
+                "entry_max":   {"type": "number", "description": "Upper bound of entry price range"},
+                "stop_loss_price": {"type": "number"},
+                "target_price":    {"type": "number"},
+                "quantity":        {"type": "integer"},
+                "thesis":          {"type": "string", "description": "1-2 sentence entry thesis"},
+                "rsi_max": {
+                    "type": "number",
+                    "description": "Optional RSI(14) ceiling on 15-min chart. Entry blocked if RSI exceeds this.",
+                },
+                "candle_close_above": {
+                    "type": "number",
+                    "description": "Optional: only enter if the latest completed 15-min candle closed above this price.",
+                },
+            },
+            "required": ["symbol", "security_id", "entry_min", "entry_max",
+                         "stop_loss_price", "target_price", "quantity", "thesis"],
+        },
+    },
+    {
+        "name": "remove_from_watchlist",
+        "description": "Remove a stock from the intraday watchlist (e.g. thesis broken, avoid today).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "NSE ticker symbol to remove"},
+            },
+            "required": ["symbol"],
         },
     },
 ]
