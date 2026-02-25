@@ -30,3 +30,6 @@ web/tsconfig.tsbuildinfo
 
 # macOS
 .DS_Store
+
+# Local docs — not for version control
+DEPLOY.md
