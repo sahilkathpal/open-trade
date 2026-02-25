@@ -169,9 +169,14 @@ class DhanClient:
         resp = self.dhan.get_fund_limits()
         if isinstance(resp, dict):
             data = resp.get("data", resp)
+            available = float(data.get("availabelBalance", data.get("available_balance", 0)))
+            used      = float(data.get("utilizedAmount", data.get("used_margin", 0)))
+            sod       = float(data.get("sodLimit", 0))
+            # Dhan doesn't expose realized P&L directly; derive it from SOD limit
+            day_pnl   = round((available + used) - sod, 2) if sod else 0.0
             return {
-                "available_balance": float(data.get("availabelBalance", data.get("available_balance", 0))),
-                "used_margin":       float(data.get("utilizedAmount", data.get("used_margin", 0))),
-                "day_pnl":           float(data.get("unrealizedProfit", data.get("day_pnl", 0))),
+                "available_balance": available,
+                "used_margin":       used,
+                "day_pnl":           day_pnl,
             }
         return {"available_balance": 0.0, "used_margin": 0.0, "day_pnl": 0.0}
