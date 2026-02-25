@@ -1,5 +1,5 @@
 """
-Daily token usage tracker. Persists to memory/USAGE.json.
+Daily token usage tracker. Persists to {memory_dir}/USAGE.json (per-user).
 
 Format:
 {
@@ -23,41 +23,52 @@ Pricing (Claude Sonnet 4, as of Feb 2026):
 """
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import pytz
 
 _IST = pytz.timezone("Asia/Kolkata")
-_USAGE_PATH = Path("memory/USAGE.json")
 _lock = threading.Lock()
 
 # Claude Sonnet 4 pricing (USD per token)
 INPUT_PRICE = 3.00 / 1_000_000
 OUTPUT_PRICE = 15.00 / 1_000_000
 
+_FALLBACK_PATH = Path("memory/USAGE.json")
 
-def _load() -> dict:
-    if _USAGE_PATH.exists():
+
+def _usage_path() -> Path:
+    try:
+        from agent.user_context import get_user_ctx
+        ctx = get_user_ctx()
+        return ctx.memory_dir / "USAGE.json"
+    except Exception:
+        return _FALLBACK_PATH
+
+
+def _load(path: Path) -> dict:
+    if path.exists():
         try:
-            return json.loads(_USAGE_PATH.read_text())
+            return json.loads(path.read_text())
         except Exception:
             pass
     return {}
 
 
-def _save(data: dict):
-    _USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _USAGE_PATH.write_text(json.dumps(data, indent=2))
+def _save(path: Path, data: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
 
 
 def record(input_tokens: int, output_tokens: int, job_type: str):
     """Record token usage for one API call."""
     today = datetime.now(_IST).strftime("%Y-%m-%d")
     cost = (input_tokens * INPUT_PRICE) + (output_tokens * OUTPUT_PRICE)
+    path = _usage_path()
 
     with _lock:
-        data = _load()
+        data = _load(path)
         day = data.setdefault(today, {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -76,14 +87,15 @@ def record(input_tokens: int, output_tokens: int, job_type: str):
         job["output"] += output_tokens
         job["calls"] += 1
 
-        _save(data)
+        _save(path, data)
 
 
 def get_today() -> dict:
-    """Return today's usage summary."""
+    """Return today's usage summary for the current user."""
     today = datetime.now(_IST).strftime("%Y-%m-%d")
+    path = _usage_path()
     with _lock:
-        data = _load()
+        data = _load(path)
         return data.get(today, {
             "date": today,
             "input_tokens": 0,
@@ -95,6 +107,7 @@ def get_today() -> dict:
 
 
 def get_all() -> dict:
-    """Return all historical usage data."""
+    """Return all historical usage data for the current user."""
+    path = _usage_path()
     with _lock:
-        return _load()
+        return _load(path)

@@ -114,6 +114,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
+      <head><title>vibe-trade</title></head>
       <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans antialiased`}>
         <AuthProvider>
           <AppShell>{children}</AppShell>

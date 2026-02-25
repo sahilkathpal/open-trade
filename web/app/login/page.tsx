@@ -54,7 +54,7 @@ export default function LoginPage() {
         {/* Header */}
         <div className="mb-8">
           <h1 className="font-mono text-xl font-semibold text-text-primary mb-1">
-            open-trade
+            vibe-trade
           </h1>
           <p className="text-text-muted text-sm">
             {mode === "signin" ? "Sign in to your account" : "Create a new account"}

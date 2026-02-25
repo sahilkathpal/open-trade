@@ -13,7 +13,7 @@ export function AgentStatusBar({ marketOpen, agentStatus, autonomous }: AgentSta
   return (
     <div className="fixed top-0 left-0 right-0 z-50 h-14 bg-surface border-b border-border flex items-center justify-between px-6">
       <span className="font-semibold text-text-primary text-lg tracking-tight">
-        open-trade
+        vibe-trade
       </span>
 
       <div className="flex items-center gap-2">
