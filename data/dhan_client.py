@@ -155,6 +155,11 @@ class DhanClient:
             trigger_price=trigger_price,
         )
 
+    def cancel_order(self, order_id: str) -> dict:
+        """Cancel an open order by order ID."""
+        resp = self.dhan.cancel_order(order_id=order_id)
+        return resp if isinstance(resp, dict) else {"raw": resp}
+
     def get_positions(self) -> list:
         """Get current open positions."""
         resp = self.dhan.get_positions()

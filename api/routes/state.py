@@ -70,6 +70,7 @@ def get_state():
     except Exception as e:
         positions = []
 
+
     upcoming_jobs = []
     try:
         for job in sorted(scheduler.get_jobs(), key=lambda j: j.next_run_time or 0):

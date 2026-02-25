@@ -236,6 +236,10 @@ def place_trade(
     )
 
     # Track locally so the deterministic heartbeat knows SL/target/entry
+    sl_order_id = None
+    if isinstance(sl_resp, dict):
+        sl_order_id = sl_resp.get("orderId") or sl_resp.get("data", {}).get("orderId")
+
     open_positions = _load_open_positions()
     open_positions[symbol] = {
         "security_id":    security_id,
@@ -243,6 +247,7 @@ def place_trade(
         "stop_loss_price": stop_loss_price,
         "target_price":   target_price,
         "quantity":       quantity,
+        "sl_order_id":    sl_order_id,
     }
     _save_open_positions(open_positions)
 
@@ -264,8 +269,14 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> 
             product_type="INTRA",
             price=0,
         )
-        # Remove from local position tracker
+        # Cancel the associated SL order to free up blocked margin
         open_positions = _load_open_positions()
+        sl_order_id = open_positions.get(symbol, {}).get("sl_order_id")
+        if sl_order_id:
+            try:
+                _dhan.cancel_order(sl_order_id)
+            except Exception:
+                pass  # best-effort — don't fail the exit if cancel fails
         open_positions.pop(symbol, None)
         _save_open_positions(open_positions)
         return {"status": "exit_placed", "symbol": symbol, "reason": reason, "order": resp}
