@@ -1,5 +1,6 @@
 from fastapi import APIRouter
-from agent.tools import get_funds, get_positions, pending_approvals
+from agent.tools import get_funds, get_positions, get_market_quote, pending_approvals
+from agent.heartbeat import load_tracked_positions, _ltp_from_quote
 from agent.scheduler import _is_market_open, scheduler
 from api.token_usage import get_today as get_today_usage, get_all as get_all_usage
 
@@ -12,6 +13,51 @@ _scheduler_status = {
     "last_eod": None,
 }
 
+def _build_positions() -> list[dict]:
+    """
+    Build UI-friendly position objects from OPEN_POSITIONS.json + live quotes.
+    Returns [] if no tracked positions.
+    """
+    tracked = load_tracked_positions()
+    if not tracked:
+        return []
+
+    # Confirm which symbols are actually still open on Dhan
+    live = get_positions()
+    live_symbols: set[str] = set()
+    if live and not (len(live) == 1 and isinstance(live[0], dict) and live[0].get("error")):
+        for p in live:
+            sym = p.get("tradingSymbol") or p.get("symbol", "")
+            qty = p.get("netQty") or p.get("quantity", 0)
+            if sym and int(qty) != 0:
+                live_symbols.add(sym)
+
+    result = []
+    for symbol, pos in tracked.items():
+        if symbol not in live_symbols:
+            continue  # already closed on exchange
+        entry   = pos["entry_price"]
+        sl      = pos["stop_loss_price"]
+        target  = pos.get("target_price", 0.0)
+        qty     = pos["quantity"]
+
+        # Get live price
+        quote = get_market_quote([symbol])
+        ltp = _ltp_from_quote(quote) or entry  # fallback to entry if quote fails
+        pnl = round((ltp - entry) * qty, 2)
+
+        result.append({
+            "symbol":          symbol,
+            "entry_price":     entry,
+            "current_price":   ltp,
+            "quantity":        qty,
+            "pnl":             pnl,
+            "stop_loss_price": sl,
+            "target_price":    target,
+        })
+    return result
+
+
 @router.get("/api/state")
 def get_state():
     try:
@@ -20,7 +66,7 @@ def get_state():
         capital = {"available_balance": 0, "used_margin": 0, "day_pnl": 0, "error": str(e)}
 
     try:
-        positions = get_positions()
+        positions = _build_positions()
     except Exception as e:
         positions = []
 
