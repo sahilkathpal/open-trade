@@ -134,10 +134,23 @@ def get_state(uid: Annotated[str, Depends(get_current_uid)]):
         if dhan_configured and not token_expired and not ctx.paused and _is_market_open():
             from datetime import datetime
             import pytz
-            today = datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d")
+            now = datetime.now(pytz.timezone("Asia/Kolkata"))
             market_md = ctx.memory_dir / "MARKET.md"
-            if not market_md.exists() or today not in market_md.read_text():
+            if not market_md.exists():
                 catchup_available = True
+            else:
+                content = market_md.read_text()
+                # Agent may write the date in any format — check common variants
+                date_variants = [
+                    now.strftime("%Y-%m-%d"),       # 2026-02-26
+                    now.strftime("%d %B %Y"),        # 26 February 2026
+                    now.strftime("%d %b %Y"),        # 26 Feb 2026
+                    now.strftime("%B %d, %Y"),       # February 26, 2026
+                    now.strftime("%b %d, %Y"),       # Feb 26, 2026
+                    now.strftime("%d/%m/%Y"),         # 26/02/2026
+                ]
+                if not any(v in content for v in date_variants):
+                    catchup_available = True
 
         return {
             "capital":           capital,
