@@ -416,6 +416,11 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> 
 
         open_positions.pop(symbol, None)
         _save_open_positions(open_positions)
+        try:
+            from api import activity_log
+            activity_log.emit({"type": "trade", "symbol": symbol, "summary": f"EXIT {symbol}: {reason}"})
+        except Exception:
+            pass
         return {"status": "exit_placed", "symbol": symbol, "reason": reason, "order": resp}
     except Exception as e:
         return {"error": str(e)}
