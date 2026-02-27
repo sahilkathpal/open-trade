@@ -1,0 +1,259 @@
+"use client"
+
+import { useState } from "react"
+import { SlidePanel } from "@/components/SlidePanel"
+import { CapitalPanel } from "@/components/CapitalPanel"
+import { RiskGauge } from "@/components/RiskGauge"
+import { PositionCard } from "@/components/PositionCard"
+import { WatchlistCard } from "@/components/WatchlistCard"
+import { TriggerCard } from "@/components/TriggerCard"
+import { ProposalCard } from "@/components/ProposalCard"
+import { TokenUsageCard } from "@/components/TokenUsageCard"
+import { MISCountdown } from "@/components/MISCountdown"
+import { useAuth } from "@/lib/auth"
+import { AppState } from "@/lib/types"
+
+interface DashboardPanelProps {
+  open: boolean
+  onClose: () => void
+  state: AppState | null
+  onStateRefresh: () => void
+}
+
+type Tab = "overview" | "positions" | "watchlist" | "triggers" | "approvals"
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "positions", label: "Positions" },
+  { id: "watchlist", label: "Watchlist" },
+  { id: "triggers", label: "Triggers" },
+  { id: "approvals", label: "Approvals" },
+]
+
+const JOB_LABELS: Record<string, string> = {
+  premarket: "Pre-market screening",
+  execution: "Execution planning",
+  heartbeat: "Heartbeat (every 1 min)",
+  clear_proposals: "Clear proposals",
+  eod: "EOD report",
+}
+
+function formatNextRun(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Kolkata",
+  })
+}
+
+export function DashboardPanel({
+  open,
+  onClose,
+  state,
+  onStateRefresh,
+}: DashboardPanelProps) {
+  const { authFetch } = useAuth()
+  const [activeTab, setActiveTab] = useState<Tab>("overview")
+  const [pauseLoading, setPauseLoading] = useState(false)
+
+  const agentPnl = state?.agent_pnl ?? { realized: 0, unrealized: 0, total: 0 }
+  const deployedNotional = (state?.positions ?? []).reduce(
+    (sum, p) => sum + p.entry_price * p.quantity,
+    0
+  )
+
+  const approvalEntries = Object.entries(state?.pending_approvals ?? {})
+  const watchlistEntries = Object.entries(state?.watchlist ?? {})
+
+  async function handlePauseResume() {
+    if (!state) return
+    setPauseLoading(true)
+    try {
+      const endpoint = state.paused ? "/api/resume" : "/api/pause"
+      await authFetch(endpoint, { method: "POST" })
+      onStateRefresh()
+    } catch {
+      // fail silently
+    } finally {
+      setPauseLoading(false)
+    }
+  }
+
+  return (
+    <>
+      <SlidePanel title="Dashboard" width="w-[560px]" open={open} onClose={onClose}>
+        {/* Tabs */}
+        <div className="flex border-b border-border px-4 shrink-0 overflow-x-auto">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-3 py-2 text-xs font-mono transition-colors whitespace-nowrap ${
+                activeTab === tab.id
+                  ? "text-text-primary border-b-2 border-text-primary"
+                  : "text-text-muted hover:text-text-primary"
+              }`}
+            >
+              {tab.label}
+              {tab.id === "approvals" && approvalEntries.length > 0 && (
+                <span className="ml-1.5 bg-accent-amber text-black rounded-full px-1.5 py-0.5 text-[10px] font-semibold">
+                  {approvalEntries.length}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {/* Tab content */}
+        <div className="p-4 space-y-4">
+          {/* Overview */}
+          {activeTab === "overview" && state && (
+            <>
+              <CapitalPanel
+                capital={state.capital}
+                agentPnl={agentPnl}
+                seedCapital={state.seed_capital ?? 0}
+                deployedNotional={deployedNotional}
+              />
+
+              <RiskGauge
+                dayPnl={agentPnl.total}
+                limit={state.daily_loss_limit ?? 1000}
+              />
+
+              <TokenUsageCard usage={state.token_usage} />
+
+              {/* Upcoming schedule */}
+              <div className="bg-background rounded-lg border border-border p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-xs uppercase tracking-wider text-text-muted font-medium">
+                    Upcoming Schedule
+                  </span>
+                  <button
+                    onClick={handlePauseResume}
+                    disabled={pauseLoading}
+                    className={`text-xs font-mono px-3 py-1 rounded border transition-colors disabled:opacity-50 ${
+                      state.paused
+                        ? "border-accent-green text-accent-green hover:bg-accent-green/10"
+                        : "border-accent-amber text-accent-amber hover:bg-accent-amber/10"
+                    }`}
+                  >
+                    {pauseLoading ? "..." : state.paused ? "Resume" : "Pause"}
+                  </button>
+                </div>
+
+                {state.upcoming_jobs.length === 0 ? (
+                  <p className="text-text-muted text-xs font-mono">No scheduled jobs</p>
+                ) : (
+                  <div className="space-y-2">
+                    {state.upcoming_jobs.map((job) => (
+                      <div
+                        key={job.id}
+                        className="flex items-center justify-between text-xs"
+                      >
+                        <span className="text-text-muted font-mono">
+                          {JOB_LABELS[job.id] ?? job.id}
+                        </span>
+                        <span className="text-text-primary font-mono">
+                          {formatNextRun(job.next_run)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {state.paused && (
+                  <p className="text-xs text-accent-amber font-mono mt-3">
+                    Autonomous trading is paused
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* Overview loading */}
+          {activeTab === "overview" && !state && (
+            <p className="text-text-muted text-sm text-center py-12">Loading...</p>
+          )}
+
+          {/* Positions */}
+          {activeTab === "positions" && (
+            <>
+              {!state || state.positions.length === 0 ? (
+                <p className="text-text-muted text-sm text-center py-12">
+                  No open positions
+                </p>
+              ) : (
+                state.positions.map((pos) => (
+                  <PositionCard key={pos.symbol} position={pos} />
+                ))
+              )}
+            </>
+          )}
+
+          {/* Watchlist */}
+          {activeTab === "watchlist" && (
+            <>
+              {watchlistEntries.length === 0 ? (
+                <p className="text-text-muted text-sm text-center py-12">
+                  Nothing on watchlist
+                </p>
+              ) : (
+                watchlistEntries.map(([symbol, entry]) => (
+                  <WatchlistCard key={symbol} symbol={symbol} entry={entry} />
+                ))
+              )}
+            </>
+          )}
+
+          {/* Triggers */}
+          {activeTab === "triggers" && (
+            <>
+              {!state || state.triggers.length === 0 ? (
+                <p className="text-text-muted text-sm text-center py-12">
+                  No active triggers
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {state.triggers.map((trigger) => (
+                    <TriggerCard key={trigger.id} trigger={trigger} />
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Approvals */}
+          {activeTab === "approvals" && (
+            <>
+              {approvalEntries.length === 0 ? (
+                <p className="text-text-muted text-sm text-center py-12">
+                  No pending approvals
+                </p>
+              ) : (
+                approvalEntries.map(([, proposal]) => (
+                  <ProposalCard
+                    key={proposal.symbol}
+                    symbol={proposal.symbol}
+                    transaction_type={proposal.transaction_type}
+                    entry_price={proposal.entry_price}
+                    stop_loss_price={proposal.stop_loss_price}
+                    target_price={proposal.target_price}
+                    quantity={proposal.quantity}
+                    thesis={proposal.thesis}
+                    onApproved={onStateRefresh}
+                    onDenied={onStateRefresh}
+                  />
+                ))
+              )}
+            </>
+          )}
+        </div>
+      </SlidePanel>
+
+      {/* Fixed bottom-right countdown — rendered outside the panel so it's always visible */}
+      <MISCountdown positions={state?.positions ?? []} />
+    </>
+  )
+}
