@@ -10,6 +10,8 @@ interface StrategySettingsPanelProps {
   onClose: () => void
   state: AppState | null
   onStateRefresh: () => void
+  /** When provided, shows per-strategy risk fields above the portfolio guardrails */
+  strategy?: string
 }
 
 const INPUT_CLASS =
@@ -23,41 +25,77 @@ export function StrategySettingsPanel({
   onClose,
   state,
   onStateRefresh,
+  strategy,
 }: StrategySettingsPanelProps) {
   const { authFetch } = useAuth()
 
-  // Local risk form state — initialized from state
+  // ── Per-strategy risk ──────────────────────────────────────────────────────
+  const [strategyMaxPositions, setStrategyMaxPositions] = useState<number>(2)
+  const [maxTradeSize, setMaxTradeSize] = useState<number>(25000)
+  const [stopLossPct, setStopLossPct] = useState<number>(1.5)
+  const [targetPct, setTargetPct] = useState<number | "">(3)
+  const [savingStrategy, setSavingStrategy] = useState(false)
+  const [strategySaved, setStrategySaved] = useState(false)
+
+  // ── Portfolio guardrails ───────────────────────────────────────────────────
   const [seedCapital, setSeedCapital] = useState<number>(state?.seed_capital ?? 0)
   const [dailyLossLimit, setDailyLossLimit] = useState<number>(state?.daily_loss_limit ?? 0)
   const [maxOpenPositions, setMaxOpenPositions] = useState<number>(2)
   const [savingRisk, setSavingRisk] = useState(false)
   const [riskSaved, setRiskSaved] = useState(false)
 
-  // Autonomous toggle state
+  // ── Autonomous ─────────────────────────────────────────────────────────────
   const [autonomous, setAutonomous] = useState<boolean>(state?.autonomous ?? false)
   const [savingAuto, setSavingAuto] = useState(false)
 
-  // Sync local state when state prop changes or panel opens
+  // Sync when panel opens
   useEffect(() => {
-    if (open && state) {
+    if (!open) return
+    if (state) {
       setSeedCapital(state.seed_capital ?? 0)
       setDailyLossLimit(state.daily_loss_limit ?? 0)
       setAutonomous(state.autonomous ?? false)
     }
-  }, [open, state])
-
-  // Fetch max_open_positions from /api/settings since it's not in AppState
-  useEffect(() => {
-    if (!open) return
     authFetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data?.max_open_positions != null) {
-          setMaxOpenPositions(data.max_open_positions)
+        if (!data) return
+        if (data.max_open_positions != null) setMaxOpenPositions(data.max_open_positions)
+        if (strategy) {
+          const k = strategy
+          if (data[`${k}_max_positions`] != null) setStrategyMaxPositions(data[`${k}_max_positions`])
+          if (data[`${k}_max_trade_size`] != null) setMaxTradeSize(data[`${k}_max_trade_size`])
+          if (data[`${k}_stop_loss_pct`] != null) setStopLossPct(data[`${k}_stop_loss_pct`])
+          if (data[`${k}_target_pct`] != null) setTargetPct(data[`${k}_target_pct`])
         }
       })
       .catch(() => {})
-  }, [open, authFetch])
+  }, [open, state, strategy, authFetch])
+
+  const handleSaveStrategy = useCallback(async () => {
+    if (!strategy) return
+    setSavingStrategy(true)
+    setStrategySaved(false)
+    try {
+      await authFetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          [`${strategy}_max_positions`]: strategyMaxPositions,
+          [`${strategy}_max_trade_size`]: maxTradeSize,
+          [`${strategy}_stop_loss_pct`]: stopLossPct,
+          [`${strategy}_target_pct`]: targetPct === "" ? null : targetPct,
+        }),
+      })
+      setStrategySaved(true)
+      onStateRefresh()
+      setTimeout(() => setStrategySaved(false), 2000)
+    } catch {
+      // fail silently
+    } finally {
+      setSavingStrategy(false)
+    }
+  }, [strategy, authFetch, strategyMaxPositions, maxTradeSize, stopLossPct, targetPct, onStateRefresh])
 
   const handleSaveRisk = useCallback(async () => {
     setSavingRisk(true)
@@ -94,7 +132,6 @@ export function StrategySettingsPanel({
       })
       onStateRefresh()
     } catch {
-      // revert on failure
       setAutonomous(!next)
     } finally {
       setSavingAuto(false)
@@ -105,18 +142,108 @@ export function StrategySettingsPanel({
     <SlidePanel
       open={open}
       onClose={onClose}
-      title="Strategy Settings"
+      title="Risk Guardrails"
       width="w-[480px]"
     >
-      {/* Notice banner */}
-      <div className="bg-surface border border-border/50 rounded-lg mx-4 mt-4 px-4 py-3 text-xs text-text-muted">
-        Settings currently apply globally across all strategies. Per-strategy settings are coming soon.
-      </div>
+      {/* ── Per-strategy risk ── */}
+      {strategy && (
+        <div className="mt-4">
+          <div className={SECTION_HEADER_CLASS}>Strategy Risk</div>
+          <div className="px-4 py-4 space-y-4">
+            <p className="text-xs text-text-muted leading-relaxed">
+              These limits apply to this strategy only. The agent will not exceed them
+              when sizing or managing trades.
+            </p>
 
-      {/* Section: Risk Parameters */}
-      <div className="mt-4">
-        <div className={SECTION_HEADER_CLASS}>Risk Parameters</div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-mono text-text-muted block">
+                  Max positions
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={5}
+                  value={strategyMaxPositions}
+                  onChange={(e) => setStrategyMaxPositions(Number(e.target.value))}
+                  className={INPUT_CLASS}
+                />
+                <p className="text-[11px] text-text-muted">for this strategy</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-mono text-text-muted block">
+                  Max trade size (INR)
+                </label>
+                <input
+                  type="number"
+                  min={1000}
+                  step={1000}
+                  value={maxTradeSize}
+                  onChange={(e) => setMaxTradeSize(Number(e.target.value))}
+                  className={INPUT_CLASS}
+                />
+                <p className="text-[11px] text-text-muted">notional per position</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-mono text-text-muted block">
+                  Stop loss (%)
+                </label>
+                <input
+                  type="number"
+                  min={0.1}
+                  max={10}
+                  step={0.1}
+                  value={stopLossPct}
+                  onChange={(e) => setStopLossPct(Number(e.target.value))}
+                  className={INPUT_CLASS}
+                />
+                <p className="text-[11px] text-text-muted">exit if loss exceeds</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-mono text-text-muted block">
+                  Profit target (%) — optional
+                </label>
+                <input
+                  type="number"
+                  min={0.1}
+                  max={20}
+                  step={0.1}
+                  value={targetPct}
+                  placeholder="—"
+                  onChange={(e) =>
+                    setTargetPct(e.target.value === "" ? "" : Number(e.target.value))
+                  }
+                  className={INPUT_CLASS}
+                />
+                <p className="text-[11px] text-text-muted">exit if gain exceeds</p>
+              </div>
+            </div>
+
+            <button
+              onClick={handleSaveStrategy}
+              disabled={savingStrategy}
+              className="bg-accent-green text-black text-xs font-semibold px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              {savingStrategy ? "Saving..." : strategySaved ? "Saved" : "Save"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Portfolio guardrails ── */}
+      <div className={strategy ? "" : "mt-4"}>
+        <div className={SECTION_HEADER_CLASS}>Portfolio Guardrails</div>
         <div className="px-4 py-4 space-y-4">
+          <p className="text-xs text-text-muted leading-relaxed">
+            Hard limits that apply across all strategies. The agent cannot exceed these
+            regardless of individual strategy settings.
+          </p>
+
           <div className="space-y-1.5">
             <label className="text-xs font-mono text-text-muted block">
               Agent Capital (INR)
@@ -143,12 +270,12 @@ export function StrategySettingsPanel({
 
           <div className="space-y-1.5">
             <label className="text-xs font-mono text-text-muted block">
-              Max Open Positions
+              Max Open Positions (total)
             </label>
             <input
               type="number"
               min={1}
-              max={5}
+              max={10}
               value={maxOpenPositions}
               onChange={(e) => setMaxOpenPositions(Number(e.target.value))}
               className={INPUT_CLASS}
@@ -165,7 +292,7 @@ export function StrategySettingsPanel({
         </div>
       </div>
 
-      {/* Section: Autonomous Trading */}
+      {/* ── Autonomous Trading ── */}
       <div>
         <div className={SECTION_HEADER_CLASS}>Autonomous Trading</div>
         <div className="px-4 py-4">
@@ -205,21 +332,6 @@ export function StrategySettingsPanel({
         </div>
       </div>
 
-      {/* Section: Telegram */}
-      <div>
-        <div className={SECTION_HEADER_CLASS}>Telegram</div>
-        <div className="px-4 py-4">
-          <p className="text-xs text-text-muted leading-relaxed mb-3">
-            Connect Telegram for mobile notifications and to chat with your agent on the go.
-          </p>
-          <a
-            href="/settings#telegram"
-            className="text-xs font-mono text-accent-green hover:opacity-80 transition-opacity"
-          >
-            Manage in Settings &rarr;
-          </a>
-        </div>
-      </div>
     </SlidePanel>
   )
 }
