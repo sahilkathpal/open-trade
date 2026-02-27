@@ -81,7 +81,7 @@ For every placed or watched position, consider:
   — do NOT set time triggers just to have activity. If today looks quiet, set none.
 Always set expires_at to today at 15:00 IST.""",
 
-    "trigger": """A monitoring trigger you set earlier has just fired.
+    "trigger": """A monitoring trigger you set earlier has just fired. Current time: {current_time} IST.
 The specific condition and your original note are below (appended after this prompt).
 
 Review the situation with fresh data and make a decision. Steps:

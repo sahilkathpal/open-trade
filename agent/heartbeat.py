@@ -122,9 +122,9 @@ def _evaluate_triggers(
             try:
                 h, m = map(int, at_str.split(":"))
                 trigger_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                if timedelta(0) <= (now - trigger_dt) < timedelta(minutes=5):
+                if now >= trigger_dt:
                     fired = True
-                    context = f"Time trigger: {at_str} IST"
+                    context = f"Time trigger: {at_str} IST (now {now.strftime('%H:%M')} IST)"
             except Exception:
                 pass
 

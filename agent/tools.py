@@ -504,6 +504,19 @@ def write_trigger(
     if type in SYMBOL_REQUIRED_TYPES and not symbol:
         return {"error": f"'symbol' is required for trigger type '{type}'"}
 
+    if type == "time" and at:
+        try:
+            import pytz
+            from datetime import datetime as _dt
+            _IST = pytz.timezone("Asia/Kolkata")
+            _now = _dt.now(_IST)
+            h, m = map(int, at.split(":"))
+            trigger_dt = _now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if _now >= trigger_dt:
+                return {"error": f"Time trigger '{at}' is already in the past (now {_now.strftime('%H:%M')} IST). Set a future time or use a different trigger type."}
+        except ValueError:
+            return {"error": f"Invalid time format '{at}'. Use HH:MM (24-hour IST)."}
+
     triggers = load_triggers()
     triggers = [t for t in triggers if t.get("id") != id]
     trigger = {"id": id, "type": type, "reason": reason, "expires_at": expires_at}
