@@ -34,9 +34,9 @@ function conditionSummary(t: Trigger): string {
     case "price_below":
       return `${t.symbol} ≤ ₹${t.threshold?.toFixed(2)}`
     case "index_above":
-      return `${t.symbol} ≥ ₹${t.threshold?.toFixed(2)}`
+      return `${t.symbol ?? "NIFTY50"} ≥ ₹${t.threshold?.toFixed(2)}`
     case "index_below":
-      return `${t.symbol} ≤ ₹${t.threshold?.toFixed(2)}`
+      return `${t.symbol ?? "NIFTY50"} ≤ ₹${t.threshold?.toFixed(2)}`
     case "near_stop":
       return `${t.symbol} within ${t.buffer_pct}% of stop`
     case "near_target":

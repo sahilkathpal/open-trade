@@ -495,6 +495,15 @@ def write_trigger(
     Set a monitoring trigger. The heartbeat evaluates all triggers every 5 minutes
     and invokes Claude when a condition is met.
     """
+    SYMBOL_REQUIRED_TYPES = {
+        "price_above", "price_below",
+        "index_above", "index_below",
+        "near_stop", "near_target",
+        "position_pnl_pct",
+    }
+    if type in SYMBOL_REQUIRED_TYPES and not symbol:
+        return {"error": f"'symbol' is required for trigger type '{type}'"}
+
     triggers = load_triggers()
     triggers = [t for t in triggers if t.get("id") != id]
     trigger = {"id": id, "type": type, "reason": reason, "expires_at": expires_at}
