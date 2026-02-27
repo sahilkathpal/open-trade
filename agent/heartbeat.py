@@ -46,11 +46,11 @@ def _ltp_from_quote(quote: dict) -> float | None:
     """
     Extract LTP from a get_market_quote() or get_index_quote() response.
 
-    Real Dhan API nests data two levels deep:
-        {"data": {"NSE_EQ": {"<secid>": {"last_price": N}}}}
+    Real Dhan API (via dhanhq SDK) structure:
+        {"data": {"data": {"NSE_EQ": {"<secid>": {"last_price": N}}}, "status": "success"}}
     Sandbox mock is flat:
         {"data": {"SYMBOL": {"ltp": N}}}
-    Handle both formats.
+    Recurse up to 3 levels into "data" to handle both.
     """
     if not isinstance(quote, dict):
         return None
@@ -58,16 +58,20 @@ def _ltp_from_quote(quote: dict) -> float | None:
     for outer_val in data.values():
         if not isinstance(outer_val, dict):
             continue
-        # Flat format (sandbox mock): outer_val = {"ltp": N}
         ltp = outer_val.get("ltp") or outer_val.get("last_price")
         if ltp is not None:
             return float(ltp)
-        # Nested format (real Dhan API): outer_val = {"<secid>": {"last_price": N}}
         for inner_val in outer_val.values():
-            if isinstance(inner_val, dict):
-                ltp = inner_val.get("ltp") or inner_val.get("last_price")
-                if ltp is not None:
-                    return float(ltp)
+            if not isinstance(inner_val, dict):
+                continue
+            ltp = inner_val.get("ltp") or inner_val.get("last_price")
+            if ltp is not None:
+                return float(ltp)
+            for deepest_val in inner_val.values():
+                if isinstance(deepest_val, dict):
+                    ltp = deepest_val.get("ltp") or deepest_val.get("last_price")
+                    if ltp is not None:
+                        return float(ltp)
     return None
 
 

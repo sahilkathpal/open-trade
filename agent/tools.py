@@ -148,10 +148,11 @@ def reset_agent_pnl():
 def _extract_ltp(quote: dict) -> float | None:
     """Extract LTP from a get_market_quote() response.
 
-    Real Dhan API nests data two levels deep:
-        {"data": {"NSE_EQ": {"<secid>": {"last_price": N}}}}
+    Real Dhan API (via dhanhq SDK) structure:
+        {"data": {"data": {"NSE_EQ": {"<secid>": {"last_price": N}}}, "status": "success"}}
     Sandbox mock is flat:
         {"data": {"SYMBOL": {"ltp": N}}}
+    Recurse up to 3 levels into "data" to handle both.
     """
     if not isinstance(quote, dict):
         return None
@@ -163,10 +164,16 @@ def _extract_ltp(quote: dict) -> float | None:
         if ltp is not None:
             return float(ltp)
         for inner_val in outer_val.values():
-            if isinstance(inner_val, dict):
-                ltp = inner_val.get("ltp") or inner_val.get("last_price")
-                if ltp is not None:
-                    return float(ltp)
+            if not isinstance(inner_val, dict):
+                continue
+            ltp = inner_val.get("ltp") or inner_val.get("last_price")
+            if ltp is not None:
+                return float(ltp)
+            for deepest_val in inner_val.values():
+                if isinstance(deepest_val, dict):
+                    ltp = deepest_val.get("ltp") or deepest_val.get("last_price")
+                    if ltp is not None:
+                        return float(ltp)
     return None
 
 
