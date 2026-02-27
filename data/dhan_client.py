@@ -199,7 +199,7 @@ class DhanClient:
         sec_id = _INDEX_IDS.get(index.upper())
         if sec_id is None:
             return {"error": f"Unknown index: {index}. Supported: {list(_INDEX_IDS.keys())}"}
-        return self.dhan.quote_data({"NSE_IDX": [sec_id]})
+        return self.dhan.quote_data({"IDX_I": [sec_id]})
 
     def get_funds(self) -> dict:
         """Returns available_balance, used_margin, day_pnl."""
