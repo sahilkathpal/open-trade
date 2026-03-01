@@ -79,6 +79,15 @@ async def run_premarket():
     logger.info("Running pre-market analysis...")
 
     async def _run(ctx):
+        # Token expiry check — abort before wasting an LLM call
+        funds = ctx.dhan.get_funds()
+        if isinstance(funds, dict) and funds.get("token_expired"):
+            msg = "Pre-market skipped: Dhan access token has expired. Update it in Settings to resume trading."
+            logger.warning("%s uid=%s", msg, ctx.uid)
+            if _send_telegram and ctx.telegram_chat_id:
+                await _send_telegram(msg, chat_id=ctx.telegram_chat_id)
+            return
+
         # Clear stale proposals, watchlist, triggers, and P&L from previous day
         save_pending_approvals({})
         _save_watchlist({})
@@ -104,6 +113,15 @@ async def run_execution():
     logger.info("Running execution planning...")
 
     async def _run(ctx):
+        # Token expiry check
+        funds = ctx.dhan.get_funds()
+        if isinstance(funds, dict) and funds.get("token_expired"):
+            msg = "Execution skipped: Dhan access token has expired. Update it in Settings to resume trading."
+            logger.warning("%s uid=%s", msg, ctx.uid)
+            if _send_telegram and ctx.telegram_chat_id:
+                await _send_telegram(msg, chat_id=ctx.telegram_chat_id)
+            return
+
         try:
             result = await asyncio.to_thread(run, "execution")
             if _send_telegram and ctx.telegram_chat_id:
@@ -169,6 +187,15 @@ async def run_eod():
     logger.info("Running EOD report...")
 
     async def _run(ctx):
+        # Token expiry check
+        funds = ctx.dhan.get_funds()
+        if isinstance(funds, dict) and funds.get("token_expired"):
+            msg = "EOD skipped: Dhan access token has expired. Update it in Settings to resume trading."
+            logger.warning("%s uid=%s", msg, ctx.uid)
+            if _send_telegram and ctx.telegram_chat_id:
+                await _send_telegram(msg, chat_id=ctx.telegram_chat_id)
+            return
+
         try:
             result = await asyncio.to_thread(run, "eod")
             if _send_telegram and ctx.telegram_chat_id:

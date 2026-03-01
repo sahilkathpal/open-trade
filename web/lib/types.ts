@@ -31,7 +31,7 @@ export interface AppState {
     }
   >
   market_open: boolean
-  scheduler_status: { last_premarket: string | null; last_eod: string | null }
+  scheduler_status: { last_premarket: string | null; last_eod: string | null; last_heartbeat: string | null }
   upcoming_jobs: Array<{ id: string; next_run: string }>
   token_usage: TokenUsage
   dhan_configured: boolean

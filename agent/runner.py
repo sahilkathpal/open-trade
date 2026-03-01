@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Iterator
 
 import anthropic
 from dotenv import load_dotenv
@@ -283,3 +284,130 @@ def run(job_type: str, extra_prompt: str = "") -> str:
 
     activity_log.emit({"type": "job_end", "summary": f"{job_type} max iterations reached"})
     return "Max iterations reached. Agent loop terminated."
+
+
+def run_chat_stream(
+    message: str,
+    history: list[dict],
+    strategy: str = "intraday",
+    status_context: str = "",
+) -> Iterator[dict]:
+    """
+    Streaming chat agent loop.
+
+    Yields:
+        {"type": "token", "content": str}
+        {"type": "tool_call", "tool": str, "summary": str}
+        {"type": "done"}
+    """
+    soul_path = Path("memory/SOUL.md")
+    soul = soul_path.read_text() if soul_path.exists() else "You are an autonomous trading agent."
+
+    # Interface guide — what controls exist in the UI and what Claude can do from chat.
+    # Update this block when the UI changes (same commit as the UI code change).
+    interface_guide = """\
+## App Interface
+
+The user is talking to you through the open-trade web app. Here's what exists:
+
+**Strategy page tabs**
+- Chat — this conversation
+- Trades — live position table (entry, quantity, stop loss, P&L)
+- Agent — activity feed of recent tool calls and job runs; token usage chart
+- Documents — MARKET.md, STRATEGY.md, JOURNAL.md displayed read-only
+
+**Sidebar**
+- Strategy list (currently: Intraday only)
+- Thread list per strategy — each chat session is a separate thread
+- "New chat" button creates a fresh thread
+
+**Guardrails panel** (accessible from the strategy page header)
+- Seed capital, daily loss limit, max open positions, stop loss range
+- These map directly to the RiskGuard class — changes take effect immediately
+- The agent cannot override these limits; place_trade() is rejected if they're breached
+
+**Agent controls** (top-right of strategy page)
+- Pause / Resume toggle — stops scheduled jobs when paused
+- Autonomous mode toggle — when off, place_trade() requires manual approval
+
+**Settings page**
+- Broker credentials (Dhan client ID + access token)
+- Telegram bot connection (deep link)
+
+**Telegram bot** (once connected via Settings)
+- /status — pending trade proposals
+- /positions — open positions with P&L
+- /funds — account balance
+- /watchlist — current watchlist
+- /triggers — active monitoring triggers
+- /pause and /resume — pause or resume autonomous trading
+- /run premarket|execution|eod — manually trigger a scheduled job
+- /exit SYMBOL — emergency exit a position
+- approve SYMBOL / deny SYMBOL — approve or reject a pending trade proposal
+- /start [code] — initial setup or reconnect via deep link
+
+**What Claude can do from this chat**
+- Answer questions about positions, P&L, market data, fundamentals
+- Read and update MARKET.md, STRATEGY.md via read_memory/write_memory tools
+- Place trades, exit positions (subject to RiskGuard limits and autonomous mode)
+- Run screens, fetch news, get quotes on any NSE EQ symbol
+
+**What Claude cannot do from chat**
+- Change Guardrails settings (user must use the Guardrails panel)
+- Connect/disconnect the Telegram bot
+- Update Dhan credentials
+- Trigger scheduled jobs directly (premarket, execution, EOD run on their own schedule)\
+"""
+
+    # Build system: identity + interface guide + live state
+    system_parts = [soul, interface_guide]
+    if status_context:
+        system_parts.append(f"## Current State\n\n{status_context}")
+    system = "\n\n---\n\n".join(system_parts)
+
+    messages = list(history)
+    messages.append({"role": "user", "content": message})
+
+    max_iterations = 10
+    iteration = 0
+
+    while iteration < max_iterations:
+        iteration += 1
+
+        with client.messages.stream(
+            model=MODEL,
+            system=system,
+            messages=messages,
+            tools=ALL_TOOL_SCHEMAS,
+            max_tokens=4096,
+        ) as stream:
+            for text in stream.text_stream:
+                yield {"type": "token", "content": text}
+            response = stream.get_final_message()
+
+        if hasattr(response, "usage") and response.usage:
+            record_tokens(response.usage.input_tokens, response.usage.output_tokens, "chat")
+
+        if response.stop_reason == "end_turn":
+            yield {"type": "done"}
+            return
+
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    result = execute_tool(block.name, block.input)
+                    summary = _summarise_tool_result(block.name, block.input, result)
+                    yield {"type": "tool_call", "tool": block.name, "summary": summary}
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, default=str),
+                    })
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            yield {"type": "done"}
+            return
+
+    yield {"type": "done"}

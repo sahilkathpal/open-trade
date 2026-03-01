@@ -1,6 +1,6 @@
 "use client"
 
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import Link from "next/link"
 import {
   Settings,
@@ -9,22 +9,84 @@ import {
   ChevronRight,
   Plus,
   BarChart2,
+  MessageSquare,
 } from "lucide-react"
-import { useState } from "react"
+import { useState, useEffect, useCallback } from "react"
 import clsx from "clsx"
 import { useAuth } from "@/lib/auth"
 import { STRATEGY_CONFIGS, COMING_SOON_STRATEGIES } from "@/lib/types"
 
+interface ThreadMeta {
+  id: string
+  strategy: string
+  title: string
+  created_at: string
+  status: "idle" | "thinking"
+}
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return "just now"
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  return `${days}d ago`
+}
+
 export function Sidebar() {
   const pathname = usePathname()
-  const { user, signOut } = useAuth()
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const { user, signOut, authFetch } = useAuth()
   const [intradayExpanded, setIntradayExpanded] = useState(true)
+  const [threads, setThreads] = useState<ThreadMeta[]>([])
+  const [newChatLoading, setNewChatLoading] = useState(false)
 
   const isPortfolioActive = pathname === "/"
   const isIntradayActive = pathname?.startsWith("/s/intraday")
   const isSettingsActive = pathname?.startsWith("/settings")
+  const activeThreadId = isIntradayActive ? searchParams.get("t") : null
 
   const intraday = STRATEGY_CONFIGS["intraday"]
+
+  const loadThreads = useCallback(async () => {
+    try {
+      const res = await authFetch("/api/threads/intraday")
+      if (!res.ok) return
+      const data = await res.json()
+      setThreads(data)
+    } catch { /* silent */ }
+  }, [authFetch])
+
+  useEffect(() => {
+    if (intradayExpanded) {
+      loadThreads()
+    }
+  }, [intradayExpanded, loadThreads])
+
+  // Reload when a new thread is opened
+  useEffect(() => {
+    if (isIntradayActive && activeThreadId) {
+      loadThreads()
+    }
+  }, [activeThreadId, isIntradayActive, loadThreads])
+
+  const handleNewChat = useCallback(async () => {
+    setNewChatLoading(true)
+    try {
+      const res = await authFetch("/api/threads/intraday", { method: "POST" })
+      if (!res.ok) return
+      const thread = await res.json()
+      setIntradayExpanded(true)
+      router.push(`/s/intraday?t=${thread.id}`)
+      setTimeout(loadThreads, 300)
+    } catch { /* silent */ }
+    finally {
+      setNewChatLoading(false)
+    }
+  }, [authFetch, router, loadThreads])
 
   return (
     <nav className="w-56 bg-surface border-r border-border h-screen flex flex-col shrink-0">
@@ -85,32 +147,44 @@ export function Sidebar() {
 
           {intradayExpanded && (
             <div className="ml-5 mt-0.5 flex flex-col gap-0.5">
-              {/* Disabled example threads — no icon, just indented text */}
-              <div
-                className="pl-6 pr-3 py-1.5 rounded-md text-[12px] text-text-muted opacity-50 cursor-not-allowed select-none truncate"
-                title="Coming soon"
-              >
-                Planning for tomorrow
-              </div>
-              <div
-                className="pl-6 pr-3 py-1.5 rounded-md text-[12px] text-text-muted opacity-50 cursor-not-allowed select-none truncate"
-                title="Coming soon"
-              >
-                Defense sector thesis
-              </div>
+              {/* Real thread list */}
+              {threads.map((thread) => {
+                const isActive = activeThreadId === thread.id
+                return (
+                  <Link
+                    key={thread.id}
+                    href={`/s/intraday?t=${thread.id}`}
+                    className={clsx(
+                      "flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md text-[12px] truncate transition-colors",
+                      isActive
+                        ? "bg-background text-text-primary"
+                        : "text-text-muted hover:text-text-primary hover:bg-background/50"
+                    )}
+                    title={thread.title}
+                  >
+                    <MessageSquare size={11} className="shrink-0 text-text-muted" />
+                    <span className="flex-1 truncate">{thread.title}</span>
+                    <span className="text-[10px] text-text-muted shrink-0">
+                      {relativeTime(thread.created_at)}
+                    </span>
+                  </Link>
+                )
+              })}
 
-              {/* New chat — disabled */}
-              <div
-                className="flex items-center gap-2 px-3 py-1.5 rounded-md text-[12px] text-text-muted opacity-50 cursor-not-allowed select-none"
+              {/* New chat */}
+              <button
+                onClick={handleNewChat}
+                disabled={newChatLoading}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-background/50 transition-colors disabled:opacity-50 disabled:cursor-wait text-left"
               >
                 <Plus size={12} className="shrink-0" />
-                <span>New chat</span>
-              </div>
+                <span>{newChatLoading ? "Creating..." : "New chat"}</span>
+              </button>
             </div>
           )}
         </div>
 
-        {/* Coming soon strategies — muted text only, no lock, no badge */}
+        {/* Coming soon strategies — muted text only */}
         {COMING_SOON_STRATEGIES.map((s) => (
           <div
             key={s.id}

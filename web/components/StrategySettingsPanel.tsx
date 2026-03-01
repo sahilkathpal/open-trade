@@ -6,12 +6,15 @@ import { AppState } from "@/lib/types"
 import { SlidePanel } from "@/components/SlidePanel"
 
 interface StrategySettingsPanelProps {
-  open: boolean
-  onClose: () => void
   state: AppState | null
   onStateRefresh: () => void
   /** When provided, shows per-strategy risk fields above the portfolio guardrails */
   strategy?: string
+  /** Modal mode — required when not embedded */
+  open?: boolean
+  onClose?: () => void
+  /** Embedded mode: renders content directly without a SlidePanel wrapper */
+  embedded?: boolean
 }
 
 const INPUT_CLASS =
@@ -26,6 +29,7 @@ export function StrategySettingsPanel({
   state,
   onStateRefresh,
   strategy,
+  embedded,
 }: StrategySettingsPanelProps) {
   const { authFetch } = useAuth()
 
@@ -48,9 +52,9 @@ export function StrategySettingsPanel({
   const [autonomous, setAutonomous] = useState<boolean>(state?.autonomous ?? false)
   const [savingAuto, setSavingAuto] = useState(false)
 
-  // Sync when panel opens
+  // Sync when panel opens (or on mount when embedded)
   useEffect(() => {
-    if (!open) return
+    if (!open && !embedded) return
     if (state) {
       setSeedCapital(state.seed_capital ?? 0)
       setDailyLossLimit(state.daily_loss_limit ?? 0)
@@ -70,7 +74,7 @@ export function StrategySettingsPanel({
         }
       })
       .catch(() => {})
-  }, [open, state, strategy, authFetch])
+  }, [open, embedded, state, strategy, authFetch])
 
   const handleSaveStrategy = useCallback(async () => {
     if (!strategy) return
@@ -138,13 +142,8 @@ export function StrategySettingsPanel({
     }
   }, [autonomous, authFetch, onStateRefresh])
 
-  return (
-    <SlidePanel
-      open={open}
-      onClose={onClose}
-      title="Risk Guardrails"
-      width="w-[480px]"
-    >
+  const body = (
+    <>
       {/* ── Per-strategy risk ── */}
       {strategy && (
         <div className="mt-4">
@@ -331,7 +330,19 @@ export function StrategySettingsPanel({
           )}
         </div>
       </div>
+    </>
+  )
 
+  if (embedded) return <div>{body}</div>
+
+  return (
+    <SlidePanel
+      open={open ?? false}
+      onClose={onClose ?? (() => {})}
+      title="Risk Guardrails"
+      width="w-[480px]"
+    >
+      {body}
     </SlidePanel>
   )
 }

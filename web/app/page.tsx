@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import { TrendingUp, ArrowUp, ArrowRight, ShieldCheck } from "lucide-react"
 import { useAuth } from "@/lib/auth"
 import { AppState, COMING_SOON_STRATEGIES } from "@/lib/types"
@@ -18,9 +19,12 @@ function formatINR(n: number): string {
 
 export default function PortfolioPage() {
   const { authFetch } = useAuth()
+  const router = useRouter()
   const [state, setState] = useState<AppState | null>(null)
   const [maxPositions, setMaxPositions] = useState<number | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [chatInput, setChatInput] = useState("")
+  const [chatLoading, setChatLoading] = useState(false)
 
   const fetchState = useCallback(async () => {
     try {
@@ -45,6 +49,20 @@ export default function PortfolioPage() {
     const interval = setInterval(fetchState, 10000)
     return () => clearInterval(interval)
   }, [fetchState, fetchSettings])
+
+  const startIntradayChat = useCallback(async () => {
+    setChatLoading(true)
+    try {
+      const res = await authFetch("/api/threads/intraday", { method: "POST" })
+      if (!res.ok) return
+      const thread = await res.json()
+      router.push(`/s/intraday?t=${thread.id}`)
+    } catch {
+      // silent
+    } finally {
+      setChatLoading(false)
+    }
+  }, [authFetch, router])
 
   const agentPnl = state?.agent_pnl?.total ?? 0
   const positionCount = state?.positions?.length ?? 0
@@ -264,25 +282,30 @@ export default function PortfolioPage() {
 
         {/* ── Chat bar ─────────────────────────────────────────── */}
         <div className="w-full">
-          <div className="bg-surface rounded-2xl border border-border overflow-hidden">
+          <form
+            onSubmit={(e) => { e.preventDefault(); startIntradayChat() }}
+            className="bg-surface rounded-2xl border border-border overflow-hidden"
+          >
             <input
               type="text"
-              disabled
-              placeholder="Start a new strategy, or ask about your portfolio..."
-              className="w-full bg-transparent px-4 pt-4 pb-3 text-sm placeholder:text-text-muted focus:outline-none cursor-not-allowed"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onFocus={startIntradayChat}
+              placeholder="Ask about your portfolio or start a new chat..."
+              disabled={chatLoading}
+              className="w-full bg-transparent px-4 pt-4 pb-3 text-sm placeholder:text-text-muted focus:outline-none disabled:opacity-50 disabled:cursor-wait"
             />
             <div className="flex items-center justify-between px-3 pb-3">
-              <span className="text-xs text-text-muted">
-                Portfolio chat — coming soon
-              </span>
+              <span className="text-xs text-text-muted">Intraday strategy</span>
               <button
-                disabled
-                className="w-7 h-7 rounded-lg bg-text-muted/20 flex items-center justify-center cursor-not-allowed"
+                type="submit"
+                disabled={chatLoading}
+                className="w-7 h-7 rounded-lg bg-text-primary/10 flex items-center justify-center hover:bg-text-primary/20 transition-colors disabled:opacity-50 disabled:cursor-wait"
               >
-                <ArrowUp size={14} className="text-text-muted" />
+                <ArrowUp size={14} className="text-text-primary" />
               </button>
             </div>
-          </div>
+          </form>
         </div>
 
       </div>

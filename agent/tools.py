@@ -485,24 +485,52 @@ def write_trigger(
     type: str,
     reason: str,
     expires_at: str,
+    mode: str = "soft",
     symbol: str = None,
     threshold: float = None,
     at: str = None,
     buffer_pct: float = None,
     above_pct: float = None,
+    # hard-trigger fields (mode="hard", type="price_in_range")
+    security_id: str = None,
+    transaction_type: str = None,
+    entry_min: float = None,
+    entry_max: float = None,
+    stop_loss_price: float = None,
+    target_price: float = None,
+    quantity: int = None,
+    thesis: str = None,
+    rsi_max: float = None,
+    candle_close_above: float = None,
 ) -> dict:
     """
-    Set a monitoring trigger. The heartbeat evaluates all triggers every 5 minutes
-    and invokes Claude when a condition is met.
+    Set a monitoring trigger. The heartbeat evaluates all triggers every 5 minutes.
+
+    mode="soft" (default): invokes the Claude agent when the condition fires.
+    mode="hard": executes place_trade() directly (no LLM) — use for price-triggered entries
+                 where you've already decided the trade parameters.
     """
     SYMBOL_REQUIRED_TYPES = {
         "price_above", "price_below",
+        "price_in_range",
         "index_above", "index_below",
         "near_stop", "near_target",
         "position_pnl_pct",
     }
     if type in SYMBOL_REQUIRED_TYPES and not symbol:
         return {"error": f"'symbol' is required for trigger type '{type}'"}
+
+    if mode == "hard":
+        if type != "price_in_range":
+            return {"error": "Hard triggers must use type='price_in_range'"}
+        missing = [f for f in ["security_id", "transaction_type", "entry_min", "entry_max",
+                                "stop_loss_price", "target_price", "quantity", "thesis"]
+                   if locals()[f] is None]
+        if missing:
+            return {"error": f"Hard trigger missing required fields: {', '.join(missing)}"}
+
+    if type == "time" and not at:
+        return {"error": "'at' is required for type='time' (format: HH:MM IST, 24-hour)"}
 
     if type == "time" and at:
         try:
@@ -519,15 +547,25 @@ def write_trigger(
 
     triggers = load_triggers()
     triggers = [t for t in triggers if t.get("id") != id]
-    trigger = {"id": id, "type": type, "reason": reason, "expires_at": expires_at}
-    if symbol is not None:     trigger["symbol"]     = symbol
-    if threshold is not None:  trigger["threshold"]   = threshold
-    if at is not None:         trigger["at"]          = at
-    if buffer_pct is not None: trigger["buffer_pct"]  = buffer_pct
-    if above_pct is not None:  trigger["above_pct"]   = above_pct
+    trigger = {"id": id, "type": type, "mode": mode, "reason": reason, "expires_at": expires_at}
+    if symbol is not None:           trigger["symbol"]              = symbol
+    if threshold is not None:        trigger["threshold"]            = threshold
+    if at is not None:               trigger["at"]                   = at
+    if buffer_pct is not None:       trigger["buffer_pct"]           = buffer_pct
+    if above_pct is not None:        trigger["above_pct"]            = above_pct
+    if security_id is not None:      trigger["security_id"]          = security_id
+    if transaction_type is not None: trigger["transaction_type"]     = transaction_type
+    if entry_min is not None:        trigger["entry_min"]            = entry_min
+    if entry_max is not None:        trigger["entry_max"]            = entry_max
+    if stop_loss_price is not None:  trigger["stop_loss_price"]      = stop_loss_price
+    if target_price is not None:     trigger["target_price"]         = target_price
+    if quantity is not None:         trigger["quantity"]             = quantity
+    if thesis is not None:           trigger["thesis"]               = thesis
+    if rsi_max is not None:          trigger["rsi_max"]              = rsi_max
+    if candle_close_above is not None: trigger["candle_close_above"] = candle_close_above
     triggers.append(trigger)
     _save_triggers(triggers)
-    return {"status": "ok", "trigger_id": id, "type": type}
+    return {"status": "ok", "trigger_id": id, "type": type, "mode": mode}
 
 
 def remove_trigger(id: str) -> dict:
@@ -541,8 +579,22 @@ def remove_trigger(id: str) -> dict:
 
 
 def list_triggers() -> list:
-    """Return all active triggers."""
-    return load_triggers()
+    """Return all active (non-expired) triggers."""
+    now = datetime.now(_IST)
+    active = []
+    for t in load_triggers():
+        exp_str = t.get("expires_at", "")
+        if exp_str:
+            try:
+                exp = datetime.fromisoformat(exp_str)
+                if exp.tzinfo is None:
+                    exp = _IST.localize(exp)
+                if now > exp:
+                    continue
+            except Exception:
+                pass
+        active.append(t)
+    return active
 
 
 def read_memory(filename: str) -> str:
@@ -764,40 +816,6 @@ ALL_TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "add_to_watchlist",
-        "description": (
-            "Register a stock for automated intraday price-triggered entry. "
-            "The heartbeat checks every 5 minutes and calls place_trade() automatically "
-            "when price is in range and optional RSI/candle conditions are met."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "symbol":      {"type": "string"},
-                "security_id": {"type": "string"},
-                "entry_min":   {"type": "number"},
-                "entry_max":   {"type": "number"},
-                "stop_loss_price":    {"type": "number"},
-                "target_price":       {"type": "number"},
-                "quantity":           {"type": "integer"},
-                "thesis":             {"type": "string"},
-                "rsi_max":            {"type": "number"},
-                "candle_close_above": {"type": "number"},
-            },
-            "required": ["symbol", "security_id", "entry_min", "entry_max",
-                         "stop_loss_price", "target_price", "quantity", "thesis"],
-        },
-    },
-    {
-        "name": "remove_from_watchlist",
-        "description": "Remove a stock from the intraday watchlist.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"symbol": {"type": "string"}},
-            "required": ["symbol"],
-        },
-    },
-    {
         "name": "get_index_quote",
         "description": "Get the current LTP for a major NSE index (NIFTY50, BANKNIFTY, or FINNIFTY).",
         "input_schema": {
@@ -815,9 +833,15 @@ ALL_TOOL_SCHEMAS = [
     {
         "name": "write_trigger",
         "description": (
-            "Set a monitoring condition that invokes Claude when met. "
-            "Heartbeat checks every 5 minutes.\n\n"
-            "Types: time (at), price_above/below (symbol, threshold), "
+            "Set a monitoring condition. Heartbeat checks every 5 minutes.\n\n"
+            "Triggers are one-shot — they fire once and are removed. If you are invoked "
+            "by a trigger and decide not to act, re-call write_trigger to keep monitoring.\n\n"
+            "mode='soft' (default): invokes the Claude agent when the condition fires.\n"
+            "mode='hard': executes place_trade() directly — use when you've already decided "
+            "the trade and just need a price-triggered entry. Requires type='price_in_range' "
+            "plus all trade fields (security_id, transaction_type, entry_min, entry_max, "
+            "stop_loss_price, target_price, quantity, thesis). Optional: rsi_max, candle_close_above.\n\n"
+            "Soft trigger types: time (at), price_above/below (symbol, threshold), "
             "index_above/below (symbol, threshold), near_stop/near_target (symbol, buffer_pct), "
             "day_pnl_above/below (threshold), position_pnl_pct (symbol, above_pct).\n\n"
             "Always set expires_at to today 15:00 IST."
@@ -827,12 +851,13 @@ ALL_TOOL_SCHEMAS = [
             "properties": {
                 "id":         {"type": "string"},
                 "type":       {"type": "string", "enum": [
-                    "time", "price_above", "price_below",
+                    "time", "price_above", "price_below", "price_in_range",
                     "index_above", "index_below",
                     "near_stop", "near_target",
                     "day_pnl_above", "day_pnl_below",
                     "position_pnl_pct",
                 ]},
+                "mode":       {"type": "string", "enum": ["soft", "hard"], "default": "soft"},
                 "reason":     {"type": "string"},
                 "expires_at": {"type": "string", "description": "ISO 8601 datetime, today 15:00 IST"},
                 "symbol":     {"type": "string"},
@@ -840,6 +865,17 @@ ALL_TOOL_SCHEMAS = [
                 "at":         {"type": "string", "description": "'HH:MM' IST"},
                 "buffer_pct": {"type": "number"},
                 "above_pct":  {"type": "number"},
+                # hard-trigger fields
+                "security_id":        {"type": "string"},
+                "transaction_type":   {"type": "string", "enum": ["BUY", "SELL"]},
+                "entry_min":          {"type": "number"},
+                "entry_max":          {"type": "number"},
+                "stop_loss_price":    {"type": "number"},
+                "target_price":       {"type": "number"},
+                "quantity":           {"type": "integer"},
+                "thesis":             {"type": "string"},
+                "rsi_max":            {"type": "number"},
+                "candle_close_above": {"type": "number"},
             },
             "required": ["id", "type", "reason", "expires_at"],
         },

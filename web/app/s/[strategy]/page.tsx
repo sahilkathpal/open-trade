@@ -1,8 +1,8 @@
 "use client"
 
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, useCallback, useRef } from "react"
 import Link from "next/link"
-import { useParams } from "next/navigation"
+import { useParams, useRouter, useSearchParams } from "next/navigation"
 import {
   BarChart2,
   Bot,
@@ -11,13 +11,14 @@ import {
   AlertCircle,
   TrendingUp,
   ArrowUp,
-  MessageSquare,
   ChevronLeft,
   RefreshCw,
+  Zap,
+  Wrench,
+  X,
 } from "lucide-react"
 import { useAuth } from "@/lib/auth"
 import { AppState, StrategyConfig, STRATEGY_CONFIGS } from "@/lib/types"
-import { CapitalPanel } from "@/components/CapitalPanel"
 import { RiskGauge } from "@/components/RiskGauge"
 import { ProposalCard } from "@/components/ProposalCard"
 import { PositionCard } from "@/components/PositionCard"
@@ -29,7 +30,7 @@ import { ActivityFeed } from "@/components/ActivityFeed"
 import { MarkdownRenderer } from "@/components/MarkdownRenderer"
 import { StrategySettingsPanel } from "@/components/StrategySettingsPanel"
 
-type ActiveTab = "chat" | "trades" | "agent" | "documents"
+type PanelSection = "trades" | "agent" | "documents" | "guardrails"
 
 function formatINR(n: number): string {
   const abs = Math.abs(n)
@@ -40,97 +41,487 @@ function formatINR(n: number): string {
   return (n < 0 ? "-" : "") + "\u20B9" + formatted
 }
 
-// ── Chat tab ──────────────────────────────────────────────────────────────────
+// ── Chat types ─────────────────────────────────────────────────────────────────
 
-function ChatTab({
-  config,
-  state,
-}: {
-  config: StrategyConfig
-  state: AppState | null
-}) {
-  const todayPnl = state?.agent_pnl?.total ?? 0
-  const positionCount = state?.positions?.length ?? 0
-  const watchlistCount = state?.watchlist ? Object.keys(state.watchlist).length : 0
+interface ToolCallItem {
+  tool: string
+  summary: string
+}
 
+interface ChatMessage {
+  id: string
+  role: "user" | "assistant"
+  content: string
+  toolCalls?: ToolCallItem[]
+}
+
+function getWsBase(): string {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+  return apiUrl.replace(/^http/, "ws")
+}
+
+// ── Chat message components ────────────────────────────────────────────────────
+
+function UserMessage({ content }: { content: string }) {
   return (
-    <div className="flex flex-col h-full">
-      {/* Centered content */}
-      <div className="flex-1 flex flex-col items-center justify-center px-8 pb-8">
-        <div className="w-14 h-14 rounded-2xl bg-surface flex items-center justify-center mb-6 border border-border">
-          <TrendingUp size={26} className="text-text-primary" />
-        </div>
-
-        <h1 className="text-[28px] font-semibold text-text-primary mb-2 text-center">
-          {config.name}
-        </h1>
-        <p className="text-text-muted text-sm text-center mb-8">
-          {config.subtitle}
-        </p>
-
-        {state && (
-          <div className="flex items-center gap-3 mb-8 text-xs text-text-muted">
-            <span className={todayPnl >= 0 ? "text-accent-green" : "text-accent-red"}>
-              {formatINR(todayPnl)} today
-            </span>
-            <span>·</span>
-            <span>{positionCount} positions</span>
-            <span>·</span>
-            <span>{watchlistCount} watching</span>
-            {state.market_open && (
-              <>
-                <span>·</span>
-                <span className="text-accent-green">Market open</span>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Suggestion cards */}
-        <div className="grid grid-cols-3 gap-3 w-full max-w-2xl">
-          {[
-            "What's the market brief for today?",
-            "Review this week's trades and learnings",
-            "Suggest improvements to my strategy",
-          ].map((prompt) => (
-            <button
-              key={prompt}
-              disabled
-              className="bg-surface rounded-xl p-4 text-left border border-border/50 cursor-not-allowed opacity-70 text-xs text-text-muted leading-relaxed"
-            >
-              {prompt}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Input */}
-      <div className="px-6 pb-6 shrink-0">
-        <div className="max-w-2xl mx-auto bg-surface rounded-2xl border border-border overflow-hidden">
-          <input
-            type="text"
-            disabled
-            placeholder="Ask your agent anything — chat coming soon"
-            className="w-full bg-transparent px-4 pt-4 pb-3 text-sm placeholder:text-text-muted focus:outline-none cursor-not-allowed"
-          />
-          <div className="flex items-center justify-between px-3 pb-3">
-            <span className="text-xs text-text-muted font-mono">{config.name}</span>
-            <button
-              disabled
-              className="w-7 h-7 rounded-lg bg-text-muted/20 flex items-center justify-center cursor-not-allowed"
-            >
-              <ArrowUp size={14} className="text-text-muted" />
-            </button>
-          </div>
-        </div>
+    <div className="flex justify-end">
+      <div className="bg-surface border border-border rounded-xl px-4 py-3 max-w-lg text-left">
+        <p className="text-[11px] text-text-muted mb-1">You</p>
+        <p className="text-sm text-text-primary leading-relaxed whitespace-pre-wrap">{content}</p>
       </div>
     </div>
   )
 }
 
-// ── Trades tab ────────────────────────────────────────────────────────────────
+function AssistantMessage({
+  content,
+  toolCalls,
+  isStreaming,
+}: {
+  content: string
+  toolCalls?: ToolCallItem[]
+  isStreaming?: boolean
+}) {
+  return (
+    <div className="flex justify-start">
+      <div className="border-l-2 border-accent-green pl-4 max-w-xl text-left">
+        <div className="flex items-center gap-1.5 mb-1">
+          <Zap size={11} className="text-accent-green" />
+          <p className="text-[11px] text-accent-green">Claude</p>
+          {isStreaming && (
+            <span className="w-1.5 h-1.5 rounded-full bg-accent-green animate-pulse" />
+          )}
+        </div>
+        {toolCalls && toolCalls.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-2">
+            {toolCalls.map((tc, i) => (
+              <span
+                key={i}
+                className="inline-flex items-center gap-1 bg-surface border border-border rounded px-2 py-0.5 text-[11px] font-mono text-text-muted"
+              >
+                <Wrench size={10} className="shrink-0" />
+                {tc.tool}
+                {tc.summary ? ` · ${tc.summary}` : ""}
+              </span>
+            ))}
+          </div>
+        )}
+        {content && <MarkdownRenderer content={content} />}
+        {isStreaming && !content && (
+          <p className="text-sm text-text-muted leading-relaxed">...</p>
+        )}
+      </div>
+    </div>
+  )
+}
 
-function TradesTab({
+// ── Chat ──────────────────────────────────────────────────────────────────────
+
+const CHAT_SUGGESTIONS = [
+  "What's the market brief for today?",
+  "Review this week's trades and learnings",
+  "Suggest improvements to my strategy",
+]
+
+function ChatArea({
+  config,
+  state,
+  authFetch,
+  strategyId,
+  threadId,
+}: {
+  config: StrategyConfig
+  state: AppState | null
+  authFetch: ReturnType<typeof useAuth>["authFetch"]
+  strategyId: string
+  threadId: string | null
+}) {
+  const router = useRouter()
+  const { user } = useAuth()
+
+  const todayPnl = state?.agent_pnl?.total ?? 0
+  const positionCount = state?.positions?.length ?? 0
+  const watchlistCount = state?.watchlist ? Object.keys(state.watchlist).length : 0
+
+  // Splash mode
+  const [chatInput, setChatInput] = useState("")
+  const [chatLoading, setChatLoading] = useState(false)
+
+  // Chat mode
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [streaming, setStreaming] = useState<{ content: string; toolCalls: ToolCallItem[] } | null>(null)
+  const [input, setInput] = useState("")
+  const [isConnected, setIsConnected] = useState(false)
+  const [isThinking, setIsThinking] = useState(false)
+
+  const wsRef = useRef<WebSocket | null>(null)
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const bottomRef = useRef<HTMLDivElement | null>(null)
+  const reconnectDelayRef = useRef(1000)
+  const mountedRef = useRef(true)
+  const userRef = useRef(user)
+  const genRef = useRef(0)
+  const streamingRef = useRef<{ content: string; toolCalls: ToolCallItem[] } | null>(null)
+
+  // Keep userRef current without rebuilding connect on every auth re-render
+  useEffect(() => { userRef.current = user }, [user])
+  // streamingRef is updated directly in onmessage handlers (not via useEffect)
+  // so the done handler always reads the latest value without waiting for a render cycle.
+
+  // Create thread and navigate (optionally store a pending first message)
+  const startChat = useCallback(async (message?: string) => {
+    if (chatLoading) return
+    setChatLoading(true)
+    try {
+      const res = await authFetch(`/api/threads/${strategyId}`, { method: "POST" })
+      if (!res.ok) return
+      const thread = await res.json()
+      if (message?.trim()) {
+        sessionStorage.setItem(`thread-init-${thread.id}`, message.trim())
+      }
+      router.push(`/s/${strategyId}?t=${thread.id}`)
+    } catch { /* silent */ }
+    finally { setChatLoading(false) }
+  }, [authFetch, strategyId, router, chatLoading])
+
+  // Reset chat state when threadId changes
+  useEffect(() => {
+    setMessages([])
+    setStreaming(null)
+    setInput("")
+    setIsConnected(false)
+    setIsThinking(false)
+    reconnectDelayRef.current = 1000
+  }, [threadId])
+
+  // Load history when threadId is set
+  useEffect(() => {
+    if (!threadId) return
+    let cancelled = false
+    async function load() {
+      try {
+        const res = await authFetch(`/api/threads/${strategyId}/${threadId}/messages`)
+        if (cancelled) return
+        if (res.status === 404) {
+          router.replace(`/s/${strategyId}`)
+          return
+        }
+        if (!res.ok) return
+        const data = await res.json()
+        const loaded: ChatMessage[] = data.messages.map(
+          (m: { role: string; content: string }, i: number) => ({
+            id: `loaded-${i}`,
+            role: m.role as "user" | "assistant",
+            content: m.content,
+          })
+        )
+        setMessages(loaded)
+      } catch { /* silent */ }
+    }
+    load()
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyId, threadId])  // authFetch intentionally omitted — reloading history on token refresh would overwrite live messages
+
+  // WebSocket connection
+  const connect = useCallback(async () => {
+    if (!threadId) return
+    if (reconnectRef.current) {
+      clearTimeout(reconnectRef.current)
+      reconnectRef.current = null
+    }
+
+    // Bump generation: any onclose from a previous socket will see a stale gen and skip reconnect
+    const myGen = ++genRef.current
+    wsRef.current?.close()
+
+    const token = userRef.current ? await userRef.current.getIdToken() : null
+    const wsBase = getWsBase()
+    const wsUrl = `${wsBase}/ws/threads/${strategyId}/${threadId}${token ? `?token=${encodeURIComponent(token)}` : ""}`
+
+    const ws = new WebSocket(wsUrl)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      setIsConnected(true)
+      reconnectDelayRef.current = 1000
+
+      // Send pending initial message if any
+      const pending = sessionStorage.getItem(`thread-init-${threadId}`)
+      if (pending) {
+        sessionStorage.removeItem(`thread-init-${threadId}`)
+        setTimeout(() => {
+          const content = pending.trim()
+          if (!content) return
+          setMessages((prev) => [...prev, { id: `msg-init-${Date.now()}`, role: "user", content }])
+          setIsThinking(true)
+          setStreaming({ content: "", toolCalls: [] })
+          ws.send(JSON.stringify({ content }))
+        }, 50)
+      }
+    }
+
+    ws.onclose = () => {
+      // If our generation has been superseded, this was an intentional close — don't reconnect
+      if (genRef.current !== myGen) return
+      setIsConnected(false)
+      setIsThinking(false)
+      if (!mountedRef.current) return
+      const delay = reconnectDelayRef.current
+      reconnectDelayRef.current = Math.min(delay * 2, 30000)
+      reconnectRef.current = setTimeout(() => connect(), delay)
+    }
+
+    ws.onerror = () => { /* onclose handles reconnect */ }
+
+    ws.onmessage = (e) => {
+      try {
+        const event = JSON.parse(e.data)
+        if (event.type === "token") {
+          const updated = {
+            content: (streamingRef.current?.content ?? "") + event.content,
+            toolCalls: streamingRef.current?.toolCalls ?? [],
+          }
+          streamingRef.current = updated
+          setStreaming(updated)
+        } else if (event.type === "tool_call") {
+          const updated = {
+            content: streamingRef.current?.content ?? "",
+            toolCalls: [...(streamingRef.current?.toolCalls ?? []), { tool: event.tool, summary: event.summary ?? "" }],
+          }
+          streamingRef.current = updated
+          setStreaming(updated)
+        } else if (event.type === "done") {
+          // Read from ref — always has the latest tokens (direct write, no render lag).
+          // Never call setMessages inside a setStreaming updater — React Strict Mode
+          // invokes updaters twice in dev, causing the message to be appended twice.
+          const current = streamingRef.current
+          streamingRef.current = null
+          setStreaming(null)
+          setIsThinking(false)
+          if (current) {
+            const id = `msg-${Date.now()}`
+            setMessages((msgs) => [
+              ...msgs,
+              { id, role: "assistant", content: current.content, toolCalls: current.toolCalls },
+            ])
+          }
+        } else if (event.type === "error") {
+          setStreaming(null)
+          setIsThinking(false)
+        }
+      } catch { /* ignore parse errors */ }
+    }
+  }, [strategyId, threadId])  // user removed — accessed via userRef to avoid rebuild on token refresh
+
+  // Connect/disconnect based on threadId
+  useEffect(() => {
+    if (!threadId) {
+      if (reconnectRef.current) clearTimeout(reconnectRef.current)
+      wsRef.current?.close()
+      wsRef.current = null
+      return
+    }
+    mountedRef.current = true
+    connect()
+    return () => {
+      mountedRef.current = false
+      genRef.current++  // invalidate current connection so its onclose doesn't reconnect
+      if (reconnectRef.current) clearTimeout(reconnectRef.current)
+      wsRef.current?.close()
+    }
+  }, [connect, threadId])
+
+  // Auto-scroll
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [messages, streaming])
+
+  // Send message
+  const sendMessage = useCallback(() => {
+    const content = input.trim()
+    if (!content || !isConnected || isThinking) return
+    const id = `msg-${Date.now()}`
+    setMessages((prev) => [...prev, { id, role: "user", content }])
+    setInput("")
+    setIsThinking(true)
+    setStreaming({ content: "", toolCalls: [] })
+    wsRef.current?.send(JSON.stringify({ content }))
+  }, [input, isConnected, isThinking])
+
+  // ── SPLASH MODE ────────────────────────────────────────────────────────────
+  if (!threadId) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex-1 flex flex-col items-center justify-center px-8 pb-8">
+          <div className="w-14 h-14 rounded-2xl bg-surface flex items-center justify-center mb-6 border border-border">
+            <TrendingUp size={26} className="text-text-primary" />
+          </div>
+
+          <h1 className="text-[28px] font-semibold text-text-primary mb-2 text-center">
+            {config.name}
+          </h1>
+          <p className="text-text-muted text-sm text-center mb-8">
+            {config.subtitle}
+          </p>
+
+          {state && (
+            <div className="flex items-center gap-3 mb-8 text-xs text-text-muted">
+              <span className={todayPnl >= 0 ? "text-accent-green" : "text-accent-red"}>
+                {formatINR(todayPnl)} today
+              </span>
+              <span>·</span>
+              <span>{positionCount} positions</span>
+              <span>·</span>
+              <span>{watchlistCount} watching</span>
+              {state.market_open && (
+                <>
+                  <span>·</span>
+                  <span className="text-accent-green">Market open</span>
+                </>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-3 gap-3 w-full max-w-2xl">
+            {CHAT_SUGGESTIONS.map((prompt) => (
+              <button
+                key={prompt}
+                onClick={() => startChat(prompt)}
+                disabled={chatLoading}
+                className="bg-surface rounded-xl p-4 text-left border border-border hover:border-border/80 transition-colors text-xs text-text-muted leading-relaxed disabled:opacity-50 disabled:cursor-wait"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="px-6 pb-6 shrink-0">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (chatInput.trim()) startChat(chatInput)
+              else startChat()
+            }}
+            className="max-w-2xl mx-auto bg-surface rounded-2xl border border-border overflow-hidden"
+          >
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Ask your agent anything..."
+              disabled={chatLoading}
+              className="w-full bg-transparent px-4 pt-4 pb-3 text-sm placeholder:text-text-muted focus:outline-none disabled:opacity-50 disabled:cursor-wait"
+            />
+            <div className="flex items-center justify-between px-3 pb-3">
+              <span className="text-xs text-text-muted font-mono">{config.name}</span>
+              <button
+                type="submit"
+                disabled={chatLoading}
+                className="w-7 h-7 rounded-lg bg-text-primary/10 flex items-center justify-center hover:bg-text-primary/20 transition-colors disabled:opacity-50 disabled:cursor-wait"
+              >
+                <ArrowUp size={14} className="text-text-primary" />
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    )
+  }
+
+  // ── CHAT MODE ──────────────────────────────────────────────────────────────
+  return (
+    <div className="flex flex-col h-full">
+      {/* Connection bar */}
+      <div className="px-6 py-2 border-b border-border/40 flex items-center gap-2 shrink-0">
+        {isConnected ? (
+          <span className="w-1.5 h-1.5 rounded-full bg-accent-green shrink-0" title="Connected" />
+        ) : (
+          <span className="w-1.5 h-1.5 rounded-full bg-text-muted shrink-0 animate-pulse" title="Reconnecting..." />
+        )}
+        <span className="text-[11px] text-text-muted font-mono flex-1 truncate">
+          {isConnected ? "Connected" : "Reconnecting..."}
+        </span>
+        <button
+          onClick={() => router.push(`/s/${strategyId}`)}
+          className="text-[11px] text-text-muted hover:text-text-primary transition-colors shrink-0"
+        >
+          ← New chat
+        </button>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-6 py-6">
+        {messages.length === 0 && !streaming && (
+          <div className="flex flex-col items-center justify-center h-full gap-2 text-center">
+            <p className="text-text-muted text-sm">New thread</p>
+            <p className="text-text-muted text-xs max-w-sm leading-relaxed">
+              Ask about your P&L, market conditions, strategy, or anything on your mind.
+            </p>
+          </div>
+        )}
+
+        <div className="max-w-2xl mx-auto space-y-5">
+          {messages.map((msg) =>
+            msg.role === "user" ? (
+              <UserMessage key={msg.id} content={msg.content} />
+            ) : (
+              <AssistantMessage key={msg.id} content={msg.content} toolCalls={msg.toolCalls} />
+            )
+          )}
+
+          {streaming && (
+            <AssistantMessage
+              content={streaming.content}
+              toolCalls={streaming.toolCalls}
+              isStreaming
+            />
+          )}
+
+          <div ref={bottomRef} />
+        </div>
+      </div>
+
+      {/* Input */}
+      <div className="px-6 pb-6 shrink-0">
+        <form
+          onSubmit={(e) => { e.preventDefault(); sendMessage() }}
+          className="max-w-2xl mx-auto bg-surface rounded-2xl border border-border overflow-hidden"
+        >
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={
+              isThinking
+                ? "Claude is thinking..."
+                : isConnected
+                ? "Ask your agent anything..."
+                : "Connecting..."
+            }
+            disabled={!isConnected || isThinking}
+            className="w-full bg-transparent px-4 pt-4 pb-3 text-sm placeholder:text-text-muted focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+          <div className="flex items-center justify-between px-3 pb-3">
+            <span className="text-xs text-text-muted font-mono">{config.name}</span>
+            <button
+              type="submit"
+              disabled={!isConnected || isThinking || !input.trim()}
+              className="w-7 h-7 rounded-lg bg-text-primary/10 flex items-center justify-center hover:bg-text-primary/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <ArrowUp size={14} className="text-text-primary" />
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ── Trades panel content ───────────────────────────────────────────────────────
+
+function TradesContent({
   state,
   fetchState,
 }: {
@@ -139,7 +530,7 @@ function TradesTab({
 }) {
   if (!state) {
     return (
-      <div className="flex items-center justify-center h-full text-text-muted text-sm">
+      <div className="flex items-center justify-center py-12 text-text-muted text-sm">
         Loading...
       </div>
     )
@@ -153,22 +544,35 @@ function TradesTab({
     0
   )
 
-  return (
-    <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6 max-w-5xl mx-auto w-full">
-      {/* Capital + Risk */}
-      <div className="grid grid-cols-2 gap-4">
-        <CapitalPanel
-          capital={state.capital}
-          agentPnl={agentPnl}
-          seedCapital={seedCapital}
-          deployedNotional={deployedNotional}
-        />
-        <RiskGauge dayPnl={agentPnl.total} limit={lossLimit} />
-      </div>
+  const pnlPct = seedCapital > 0 ? (agentPnl.total / seedCapital) * 100 : 0
 
-      {/* Pending approvals */}
+  return (
+    <div className="px-4 py-4 space-y-4">
+      {/* 2-column stat summary — fits panel width */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-surface rounded-lg border border-border p-3">
+          <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5">P&L Today</div>
+          <div className={`font-mono text-lg leading-none ${agentPnl.total >= 0 ? "text-accent-green" : "text-accent-red"}`}>
+            {formatINR(agentPnl.total)}
+          </div>
+          <div className="text-[11px] text-text-muted font-mono mt-1">
+            {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}% · {formatINR(agentPnl.realized)} realized
+          </div>
+        </div>
+        <div className="bg-surface rounded-lg border border-border p-3">
+          <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5">Capital</div>
+          <div className="font-mono text-lg leading-none text-text-primary">
+            {formatINR(seedCapital)}
+          </div>
+          <div className="text-[11px] text-text-muted font-mono mt-1">
+            {formatINR(deployedNotional)} deployed
+          </div>
+        </div>
+      </div>
+      <RiskGauge dayPnl={agentPnl.total} limit={lossLimit} />
+
       {Object.keys(state.pending_approvals).length > 0 && (
-        <div className="space-y-3">
+        <div className="space-y-2">
           <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider">
             Pending Approvals
           </h2>
@@ -183,40 +587,42 @@ function TradesTab({
         </div>
       )}
 
-      {/* Positions + Watchlist */}
-      <div className="grid grid-cols-2 gap-6">
-        <div>
-          <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">
-            Open Positions ({state.positions.length})
-          </h2>
-          {state.positions.length === 0 ? (
-            <div className="bg-surface rounded-lg border border-border p-6 text-center text-text-muted text-sm">
-              No open positions
-            </div>
-          ) : (
-            state.positions.map((p) => <PositionCard key={p.symbol} position={p} />)
-          )}
-        </div>
-        <div>
-          <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">
-            Watchlist ({Object.keys(state.watchlist).length})
-          </h2>
-          {Object.keys(state.watchlist).length === 0 ? (
-            <div className="bg-surface rounded-lg border border-border p-6 text-center text-text-muted text-sm">
-              Nothing on watchlist
-            </div>
-          ) : (
-            Object.entries(state.watchlist).map(([symbol, entry]) => (
+      <div>
+        <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-2">
+          Open Positions ({state.positions.length})
+        </h2>
+        {state.positions.length === 0 ? (
+          <div className="bg-surface rounded-lg border border-border p-4 text-center text-text-muted text-sm">
+            No open positions
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {state.positions.map((p) => <PositionCard key={p.symbol} position={p} />)}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-2">
+          Watchlist ({Object.keys(state.watchlist).length})
+        </h2>
+        {Object.keys(state.watchlist).length === 0 ? (
+          <div className="bg-surface rounded-lg border border-border p-4 text-center text-text-muted text-sm">
+            Nothing on watchlist
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {Object.entries(state.watchlist).map(([symbol, entry]) => (
               <WatchlistCard key={symbol} symbol={symbol} entry={entry} />
-            ))
-          )}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
-// ── Agent tab ─────────────────────────────────────────────────────────────────
+// ── Agent panel content ────────────────────────────────────────────────────────
 
 const JOB_LABELS: Record<string, string> = {
   premarket: "Pre-market screening",
@@ -226,7 +632,7 @@ const JOB_LABELS: Record<string, string> = {
   eod: "EOD report",
 }
 
-function AgentTab({
+function AgentContent({
   state,
   fetchState,
   authFetch,
@@ -250,95 +656,89 @@ function AgentTab({
 
   if (!state) {
     return (
-      <div className="flex items-center justify-center h-full text-text-muted text-sm">
+      <div className="flex items-center justify-center py-12 text-text-muted text-sm">
         Loading...
       </div>
     )
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6 max-w-5xl mx-auto w-full">
-      {/* Token usage + schedule side by side */}
-      <div className="grid grid-cols-2 gap-4">
-        {/* Token usage */}
-        {state.token_usage && (
-          <TokenUsageCard usage={state.token_usage} />
-        )}
+    <div className="px-4 py-4 space-y-4">
+      {state.token_usage && (
+        <TokenUsageCard usage={state.token_usage} />
+      )}
 
-        {/* Schedule */}
-        <div className="bg-surface rounded-lg border border-border p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-medium text-text-muted uppercase tracking-wider">
-              Schedule
-            </h3>
-            <button
-              onClick={togglePause}
-              disabled={pauseLoading}
-              className={
-                state.paused
-                  ? "text-xs font-mono text-accent-green border border-accent-green/30 bg-accent-green/10 rounded px-2 py-0.5 hover:bg-accent-green/20 disabled:opacity-50"
-                  : "text-xs font-mono text-text-muted border border-border rounded px-2 py-0.5 hover:text-accent-amber hover:border-accent-amber/30 disabled:opacity-50"
-              }
-            >
-              {pauseLoading ? "..." : state.paused ? "Resume" : "Pause"}
-            </button>
-          </div>
-          {state.paused && (
-            <p className="text-xs font-mono text-accent-amber mb-2">
-              Paused — jobs will not run
-            </p>
-          )}
-          {state.upcoming_jobs.length === 0 ? (
-            <p className="text-xs text-text-muted">No upcoming jobs</p>
-          ) : (
-            <div className="space-y-1">
-              {state.upcoming_jobs.map((job) => {
-                const t = new Date(job.next_run)
-                const timeStr = t.toLocaleTimeString("en-IN", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  timeZone: "Asia/Kolkata",
-                  hour12: false,
-                })
-                const isToday = new Date().toDateString() === t.toDateString()
-                const dateStr = t.toLocaleDateString("en-IN", {
-                  day: "numeric",
-                  month: "short",
-                  timeZone: "Asia/Kolkata",
-                })
-                return (
-                  <div
-                    key={job.id}
-                    className="flex items-center justify-between text-xs py-1.5 border-b border-border/50 last:border-0"
-                  >
-                    <span
-                      className={
-                        state.paused
-                          ? "font-mono text-text-muted line-through"
-                          : "font-mono text-accent-amber"
-                      }
-                    >
-                      {JOB_LABELS[job.id] ?? job.id}
-                    </span>
-                    <span className="text-text-muted font-mono">
-                      {isToday ? "" : dateStr + " · "}
-                      {timeStr} IST
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-          )}
+      <div className="bg-surface rounded-lg border border-border p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-xs font-medium text-text-muted uppercase tracking-wider">
+            Schedule
+          </h3>
+          <button
+            onClick={togglePause}
+            disabled={pauseLoading}
+            className={
+              state.paused
+                ? "text-xs font-mono text-accent-green border border-accent-green/30 bg-accent-green/10 rounded px-2 py-0.5 hover:bg-accent-green/20 disabled:opacity-50"
+                : "text-xs font-mono text-text-muted border border-border rounded px-2 py-0.5 hover:text-accent-amber hover:border-accent-amber/30 disabled:opacity-50"
+            }
+          >
+            {pauseLoading ? "..." : state.paused ? "Resume" : "Pause"}
+          </button>
         </div>
+        {state.paused && (
+          <p className="text-xs font-mono text-accent-amber mb-2">
+            Paused — jobs will not run
+          </p>
+        )}
+        {state.upcoming_jobs.length === 0 ? (
+          <p className="text-xs text-text-muted">No upcoming jobs</p>
+        ) : (
+          <div className="space-y-1">
+            {state.upcoming_jobs.map((job) => {
+              const t = new Date(job.next_run)
+              const timeStr = t.toLocaleTimeString("en-IN", {
+                hour: "2-digit",
+                minute: "2-digit",
+                timeZone: "Asia/Kolkata",
+                hour12: false,
+              })
+              const isToday = new Date().toDateString() === t.toDateString()
+              const dateStr = t.toLocaleDateString("en-IN", {
+                day: "numeric",
+                month: "short",
+                timeZone: "Asia/Kolkata",
+              })
+              return (
+                <div
+                  key={job.id}
+                  className="flex items-center justify-between text-xs py-1.5 border-b border-border/50 last:border-0"
+                >
+                  <span
+                    className={
+                      state.paused
+                        ? "font-mono text-text-muted line-through"
+                        : "font-mono text-accent-amber"
+                    }
+                  >
+                    {JOB_LABELS[job.id] ?? job.id}
+                  </span>
+                  <span className="text-text-muted font-mono">
+                    {isToday ? "" : dateStr + " · "}
+                    {timeStr} IST
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
-      {/* Triggers */}
       {state.triggers.length > 0 && (
         <div>
-          <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">
+          <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-2">
             Monitoring Triggers ({state.triggers.length})
           </h2>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-2">
             {state.triggers.map((t) => (
               <TriggerCard key={t.id} trigger={t} />
             ))}
@@ -346,15 +746,14 @@ function AgentTab({
         </div>
       )}
 
-      {/* Activity feed */}
       <ActivityFeed />
     </div>
   )
 }
 
-// ── Documents tab ─────────────────────────────────────────────────────────────
+// ── Documents panel content ────────────────────────────────────────────────────
 
-function DocumentsTab({
+function DocumentsContent({
   strategy,
   authFetch,
 }: {
@@ -401,7 +800,7 @@ function DocumentsTab({
 
   if (!config || config.documents.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full text-text-muted text-sm">
+      <div className="px-4 py-8 text-center text-text-muted text-sm">
         No documents yet. Claude will create documents as it starts trading.
       </div>
     )
@@ -411,29 +810,27 @@ function DocumentsTab({
 
   if (selectedDoc) {
     return (
-      <div className="flex flex-col h-full">
-        <div className="flex items-center gap-3 px-6 py-3 border-b border-border shrink-0">
+      <div>
+        <div className="sticky top-0 bg-surface z-10 flex items-center gap-2 px-4 py-2.5 border-b border-border">
           <button
             onClick={() => { setSelectedDocId(null); setContent(null) }}
-            className="flex items-center gap-1.5 text-xs text-text-muted hover:text-text-primary transition-colors"
+            className="flex items-center gap-1 text-xs text-text-muted hover:text-text-primary transition-colors"
           >
             <ChevronLeft size={13} />
-            Documents
+            Docs
           </button>
-          <span className="text-border">·</span>
-          <span className="text-xs text-text-primary">{selectedDoc.title}</span>
+          <span className="text-border text-xs">·</span>
+          <span className="text-xs text-text-primary truncate">{selectedDoc.title}</span>
           <button
             onClick={() => fetchDoc(selectedDoc.file)}
-            className="ml-auto p-1 text-text-muted hover:text-text-primary transition-colors"
+            className="ml-auto p-1 text-text-muted hover:text-text-primary transition-colors shrink-0"
             title="Refresh"
           >
-            <RefreshCw size={13} />
+            <RefreshCw size={12} />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-6 py-6 max-w-4xl mx-auto w-full">
-          {loading && (
-            <p className="text-text-muted text-sm">Loading...</p>
-          )}
+        <div className="px-4 py-4">
+          {loading && <p className="text-text-muted text-sm">Loading...</p>}
           {!loading && !content && (
             <p className="text-text-muted text-sm">
               No content yet. Claude will write this document as it starts trading.
@@ -446,20 +843,22 @@ function DocumentsTab({
   }
 
   return (
-    <div className="px-6 py-6 max-w-4xl mx-auto w-full">
-      <p className="text-xs text-text-muted mb-6">
+    <div className="px-4 py-4">
+      <p className="text-xs text-text-muted mb-4">
         Claude writes and updates these documents as it learns and trades.
       </p>
-      <div className="grid grid-cols-3 gap-4">
+      <div className="space-y-2">
         {config.documents.map((doc) => (
           <button
             key={doc.id}
             onClick={() => setSelectedDocId(doc.id)}
-            className="bg-surface rounded-xl p-5 text-left border border-border hover:border-border/80 transition-colors"
+            className="w-full bg-surface rounded-lg p-4 text-left border border-border hover:border-border/80 transition-colors flex items-start gap-3"
           >
-            <FileText size={18} className="text-text-muted mb-3" />
-            <p className="text-sm font-medium text-text-primary mb-1.5">{doc.title}</p>
-            <p className="text-xs text-text-muted leading-relaxed">{doc.description}</p>
+            <FileText size={15} className="text-text-muted mt-0.5 shrink-0" />
+            <div>
+              <p className="text-sm font-medium text-text-primary mb-0.5">{doc.title}</p>
+              <p className="text-xs text-text-muted leading-relaxed">{doc.description}</p>
+            </div>
           </button>
         ))}
       </div>
@@ -469,23 +868,44 @@ function DocumentsTab({
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-const TABS: { id: ActiveTab; label: string; icon: React.ElementType }[] = [
-  { id: "chat",      label: "Chat",      icon: MessageSquare },
-  { id: "trades",    label: "Trades",    icon: BarChart2     },
-  { id: "agent",     label: "Agent",     icon: Bot           },
-  { id: "documents", label: "Documents", icon: FileText      },
+const PANEL_TABS: { id: PanelSection; label: string; icon: React.ElementType }[] = [
+  { id: "trades",     label: "Trades",     icon: BarChart2   },
+  { id: "agent",      label: "Agent",      icon: Bot         },
+  { id: "documents",  label: "Docs",       icon: FileText    },
+  { id: "guardrails", label: "Guardrails", icon: ShieldCheck },
 ]
 
 export default function StrategyPage() {
   const params = useParams()
+  const searchParams = useSearchParams()
   const strategyId = params.strategy as string
+  const threadId = searchParams.get("t")
   const config = STRATEGY_CONFIGS[strategyId]
 
   const { authFetch } = useAuth()
   const [state, setState] = useState<AppState | null>(null)
   const [catchupLoading, setCatchupLoading] = useState(false)
-  const [activeTab, setActiveTab] = useState<ActiveTab>("chat")
-  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [panelOpen, setPanelOpen] = useState(false)
+  const [panelSection, setPanelSection] = useState<PanelSection>("trades")
+  const [panelWidth, setPanelWidth] = useState(360)
+  const resizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null)
+
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    resizeDragRef.current = { startX: e.clientX, startWidth: panelWidth }
+    const onMove = (ev: MouseEvent) => {
+      if (!resizeDragRef.current) return
+      const delta = resizeDragRef.current.startX - ev.clientX
+      setPanelWidth(Math.min(Math.max(resizeDragRef.current.startWidth + delta, 280), 720))
+    }
+    const onUp = () => {
+      resizeDragRef.current = null
+      document.removeEventListener("mousemove", onMove)
+      document.removeEventListener("mouseup", onUp)
+    }
+    document.addEventListener("mousemove", onMove)
+    document.addEventListener("mouseup", onUp)
+  }, [panelWidth])
 
   const fetchState = useCallback(async () => {
     try {
@@ -504,6 +924,15 @@ export default function StrategyPage() {
     return () => clearInterval(interval)
   }, [fetchState])
 
+  const togglePanel = useCallback((section: PanelSection) => {
+    if (panelOpen && panelSection === section) {
+      setPanelOpen(false)
+    } else {
+      setPanelSection(section)
+      setPanelOpen(true)
+    }
+  }, [panelOpen, panelSection])
+
   const runCatchup = useCallback(async () => {
     setCatchupLoading(true)
     try {
@@ -512,6 +941,13 @@ export default function StrategyPage() {
       setCatchupLoading(false)
     }
   }, [authFetch])
+
+  // Risk color for Guardrails button
+  const dayLoss = state ? (state.agent_pnl?.total ?? 0) : 0
+  const lossUsed = dayLoss < 0 ? Math.abs(dayLoss) : 0
+  const lossLimit = state?.daily_loss_limit ?? 0
+  const lossPct = lossLimit > 0 ? (lossUsed / lossLimit) * 100 : 0
+  const riskLevel = lossPct > 80 ? "alert" : lossPct > 50 ? "caution" : "safe"
 
   if (!config) {
     return (
@@ -545,7 +981,7 @@ export default function StrategyPage() {
             </span>
           </div>
           <button
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => togglePanel("guardrails")}
             className="text-accent-amber font-medium underline underline-offset-2 hover:opacity-80 shrink-0 ml-4"
           >
             Settings
@@ -562,7 +998,7 @@ export default function StrategyPage() {
             </span>
           </div>
           <button
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => togglePanel("guardrails")}
             className="text-accent-red font-medium underline underline-offset-2 hover:opacity-80 shrink-0 ml-4"
           >
             Update Token
@@ -588,83 +1024,108 @@ export default function StrategyPage() {
         </div>
       )}
 
-      {/* Tab header */}
-      {(() => {
-        const dayLoss = state ? (state.agent_pnl?.total ?? 0) : 0
-        const lossUsed = dayLoss < 0 ? Math.abs(dayLoss) : 0
-        const lossLimit = state?.daily_loss_limit ?? 0
-        const lossPct = lossLimit > 0 ? (lossUsed / lossLimit) * 100 : 0
-        const riskLevel = lossPct > 80 ? "alert" : lossPct > 50 ? "caution" : "safe"
-        const shieldColor = !state ? "text-text-muted"
-          : riskLevel === "alert"   ? "text-accent-red"
-          : riskLevel === "caution" ? "text-accent-amber"
-          : "text-accent-green"
-        const shieldBg = !state ? "bg-transparent border-border"
-          : riskLevel === "alert"   ? "bg-accent-red/10 border-accent-red/30"
-          : riskLevel === "caution" ? "bg-accent-amber/10 border-accent-amber/30"
-          : "bg-accent-green/10 border-accent-green/30"
-        return (
-          <div className="border-b border-border shrink-0 flex items-center justify-between px-4">
-            <div className="flex items-center">
-              {TABS.map(({ id, label, icon: Icon }) => {
-                const isActive = activeTab === id
-                return (
-                  <button
-                    key={id}
-                    onClick={() => setActiveTab(id)}
-                    className={[
-                      "flex items-center gap-1.5 px-3 py-3 text-xs font-medium border-b-2 transition-colors -mb-px",
-                      isActive
-                        ? "border-text-primary text-text-primary"
-                        : "border-transparent text-text-muted hover:text-text-primary",
-                    ].join(" ")}
-                  >
-                    <Icon size={13} />
-                    {label}
-                  </button>
-                )
-              })}
-            </div>
+      {/* Header: panel toggle buttons */}
+      <div className="border-b border-border shrink-0 flex items-center justify-end px-4 py-1.5 gap-1">
+        {PANEL_TABS.map(({ id, label, icon: Icon }) => {
+          const isActive = panelOpen && panelSection === id
+          const isGuardrails = id === "guardrails"
+          const guardColor = isGuardrails
+            ? riskLevel === "alert"   ? "text-accent-red"
+            : riskLevel === "caution" ? "text-accent-amber"
+            : "text-accent-green"
+            : ""
+          return (
             <button
-              onClick={() => setSettingsOpen(true)}
+              key={id}
+              onClick={() => togglePanel(id)}
+              title={label}
               className={[
-                "flex items-center gap-1.5 mr-1 px-2.5 py-1.5 rounded-md border text-xs font-medium transition-colors hover:opacity-80",
-                shieldColor, shieldBg,
+                "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors",
+                isActive
+                  ? "bg-surface border border-border text-text-primary"
+                  : "text-text-muted hover:text-text-primary hover:bg-surface/60",
+                isGuardrails && !isActive ? guardColor : "",
               ].join(" ")}
-              title="Risk guardrails"
             >
-              <ShieldCheck size={14} />
-              <span>Guardrails</span>
+              <Icon size={13} />
+              <span className="hidden sm:inline">{label}</span>
             </button>
-          </div>
-        )
-      })()}
+          )
+        })}
+      </div>
 
-      {/* Tab content */}
-      <div className="flex-1 overflow-hidden flex flex-col min-h-0">
-        {activeTab === "chat" && (
-          <ChatTab config={config} state={state} />
-        )}
-        {activeTab === "trades" && (
-          <TradesTab state={state} fetchState={fetchState} />
-        )}
-        {activeTab === "agent" && (
-          <AgentTab state={state} fetchState={fetchState} authFetch={authFetch} />
-        )}
-        {activeTab === "documents" && (
-          <DocumentsTab strategy={strategyId} authFetch={authFetch} />
+      {/* Main: chat + right panel */}
+      <div className="flex-1 overflow-hidden flex min-h-0">
+
+        {/* Chat — always shown, fills available width */}
+        <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+          <ChatArea
+            config={config}
+            state={state}
+            authFetch={authFetch}
+            strategyId={strategyId}
+            threadId={threadId}
+          />
+        </div>
+
+        {/* Right panel */}
+        {panelOpen && (
+          <div
+            className="shrink-0 border-l border-border flex flex-col overflow-hidden relative"
+            style={{ width: panelWidth }}
+          >
+            {/* Drag-to-resize handle on left edge */}
+            <div
+              className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-10 hover:bg-white/10 active:bg-white/20 transition-colors"
+              onMouseDown={handleResizeStart}
+            />
+
+            {/* Panel title bar — section label + close */}
+            {(() => {
+              const active = PANEL_TABS.find(t => t.id === panelSection)!
+              const Icon = active.icon
+              return (
+                <div className="flex items-center justify-between px-4 py-2.5 border-b border-border shrink-0">
+                  <div className="flex items-center gap-1.5 text-xs font-medium text-text-primary">
+                    <Icon size={13} />
+                    {active.label}
+                  </div>
+                  <button
+                    onClick={() => setPanelOpen(false)}
+                    className="text-text-muted hover:text-text-primary transition-colors"
+                    title="Close panel"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              )
+            })()}
+
+            {/* Section content */}
+            <div className="flex-1 overflow-y-auto">
+              {panelSection === "trades" && (
+                <TradesContent state={state} fetchState={fetchState} />
+              )}
+              {panelSection === "agent" && (
+                <AgentContent state={state} fetchState={fetchState} authFetch={authFetch} />
+              )}
+              {panelSection === "documents" && (
+                <DocumentsContent strategy={strategyId} authFetch={authFetch} />
+              )}
+              {panelSection === "guardrails" && (
+                <StrategySettingsPanel
+                  embedded
+                  state={state}
+                  onStateRefresh={fetchState}
+                  strategy={strategyId}
+                />
+              )}
+            </div>
+          </div>
         )}
       </div>
 
       <MISCountdown positions={state?.positions ?? []} />
-
-      <StrategySettingsPanel
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        state={state}
-        onStateRefresh={fetchState}
-        strategy={strategyId}
-      />
     </div>
   )
 }

@@ -19,7 +19,7 @@ import pytz
 
 from agent.tools import (
     get_positions, get_market_quote, get_historical_data, get_funds,
-    exit_position, place_trade, load_watchlist, _save_watchlist,
+    exit_position, place_trade,
     get_index_quote, load_triggers, _save_triggers, _load_agent_pnl,
 )
 from agent.user_context import get_user_ctx
@@ -81,11 +81,12 @@ def _evaluate_triggers(
     live_symbols: set,
     day_pnl: float,
     ltp_cache: dict,
+    is_entry_window: bool = True,
 ) -> list[str]:
     """
-    Evaluate TRIGGERS.json conditions. For any that fire, invoke Claude via
-    agent.runner.run() with the trigger's reason as context. Fired and expired
-    triggers are removed; remaining triggers are saved back.
+    Evaluate TRIGGERS.json conditions. Hard triggers (mode='hard') execute
+    place_trade() directly; soft triggers (mode='soft') invoke the Claude agent.
+    Fired and expired triggers are removed; remaining triggers are saved back.
     """
     triggers = load_triggers()
     if not triggers:
@@ -144,6 +145,41 @@ def _evaluate_triggers(
                 elif ttype == "price_below" and ltp <= threshold:
                     fired = True
                     context = f"{symbol} LTP ₹{ltp:.2f} ≤ ₹{threshold:.2f}"
+
+        # ── price_in_range (hard trigger) ─────────────────────────────────
+        elif ttype == "price_in_range":
+            if not is_entry_window:
+                remaining.append(trigger)
+                continue
+            symbol    = trigger.get("symbol", "")
+            entry_min = trigger.get("entry_min", 0)
+            entry_max = trigger.get("entry_max", float("inf"))
+            ltp = ltp_cache.get(symbol)
+            if ltp is None:
+                ltp = _ltp_from_quote(get_market_quote([symbol]))
+                if ltp is not None:
+                    ltp_cache[symbol] = ltp
+            if ltp is not None and entry_min <= ltp <= entry_max:
+                # optional guards
+                rsi_max     = trigger.get("rsi_max")
+                close_above = trigger.get("candle_close_above")
+                guards_ok   = True
+                if rsi_max or close_above:
+                    hist = get_historical_data(symbol, interval="15", days=1)
+                    if isinstance(hist, dict) and not hist.get("error"):
+                        if rsi_max:
+                            rsi = hist.get("indicators", {}).get("RSI_14")
+                            if rsi and rsi > rsi_max:
+                                guards_ok = False
+                                logger.debug("%s RSI %.1f > max %.1f — skipping", symbol, rsi, rsi_max)
+                        if close_above and guards_ok:
+                            candles = hist.get("recent_candles", [])
+                            if not candles or candles[-1].get("close", 0) < close_above:
+                                guards_ok = False
+                                logger.debug("%s candle close below %.2f — skipping", symbol, close_above)
+                if guards_ok:
+                    fired   = True
+                    context = f"{symbol} LTP ₹{ltp:.2f} in range ₹{entry_min}–₹{entry_max}"
 
         # ── index_above / index_below ──────────────────────────────────────
         elif ttype in ("index_above", "index_below"):
@@ -232,17 +268,40 @@ def _evaluate_triggers(
         # ── fire ───────────────────────────────────────────────────────────
         if fired:
             logger.info("Trigger %s fired: %s", tid, context)
-            try:
-                from agent.runner import run as agent_run
-                extra = (
-                    f"Trigger fired: {context}\n"
-                    f"Your original note when setting this trigger: {reason}"
-                )
-                agent_run("trigger", extra_prompt=extra)
-                alerts.append(f"TRIGGER [{tid}]: {context}")
-            except Exception as e:
-                logger.error("Trigger %s: agent invocation failed: %s", tid, e)
-                alerts.append(f"TRIGGER [{tid}] ERROR: {e}")
+            tmode = trigger.get("mode", "soft")
+            if tmode == "hard":
+                # Execute place_trade() directly — no LLM
+                symbol = trigger.get("symbol", "")
+                ltp    = ltp_cache.get(symbol)
+                try:
+                    result = place_trade(
+                        symbol=symbol,
+                        security_id=trigger["security_id"],
+                        transaction_type=trigger.get("transaction_type", "BUY"),
+                        quantity=trigger["quantity"],
+                        entry_price=ltp,
+                        stop_loss_price=trigger["stop_loss_price"],
+                        target_price=trigger["target_price"],
+                        thesis=trigger["thesis"],
+                    )
+                    status = result.get("status", "unknown") if isinstance(result, dict) else str(result)
+                    alerts.append(f"HARD TRIGGER [{tid}] {symbol} @ ₹{ltp:.2f} — {status}")
+                    logger.info("Hard trigger trade %s: %s", symbol, result)
+                except Exception as e:
+                    logger.error("Hard trigger %s: place_trade failed: %s", tid, e)
+                    alerts.append(f"HARD TRIGGER [{tid}] ERROR: {e}")
+            else:
+                try:
+                    from agent.runner import run as agent_run
+                    extra = (
+                        f"Trigger fired: {context}\n"
+                        f"Your original note when setting this trigger: {reason}"
+                    )
+                    agent_run("trigger", extra_prompt=extra)
+                    alerts.append(f"TRIGGER [{tid}]: {context}")
+                except Exception as e:
+                    logger.error("Trigger %s: agent invocation failed: %s", tid, e)
+                    alerts.append(f"TRIGGER [{tid}] ERROR: {e}")
         else:
             remaining.append(trigger)
 
@@ -348,61 +407,10 @@ def run() -> str:
                 logger.info("Profit lock exit %s: %s", symbol, result)
                 continue
 
-    # ── 3. Watchlist entry triggers ────────────────────────────────────────
-    watchlist = load_watchlist()
+    # ── 3. Triggers (hard + soft) ──────────────────────────────────────────
     is_entry_window = (9, 45) <= (now.hour, now.minute) < (EOD_EXIT_HOUR, EOD_EXIT_MIN)
-
-    if watchlist and is_entry_window:
-        watchlist_dirty = False
-        for symbol, cond in list(watchlist.items()):
-            ltp = ltp_cache.get(symbol) or _ltp_from_quote(get_market_quote([symbol]))
-            if ltp is not None:
-                ltp_cache[symbol] = ltp
-            if ltp is None:
-                logger.warning("Could not get quote for watchlist symbol %s", symbol)
-                continue
-
-            if not (cond["entry_min"] <= ltp <= cond["entry_max"]):
-                continue
-
-            rsi_max     = cond.get("rsi_max")
-            close_above = cond.get("candle_close_above")
-            if rsi_max or close_above:
-                hist = get_historical_data(symbol, interval="15", days=1)
-                if isinstance(hist, dict) and not hist.get("error"):
-                    if rsi_max:
-                        rsi = hist.get("indicators", {}).get("RSI_14")
-                        if rsi and rsi > rsi_max:
-                            logger.debug("%s RSI %.1f > max %.1f — skipping", symbol, rsi, rsi_max)
-                            continue
-                    if close_above:
-                        candles = hist.get("recent_candles", [])
-                        if not candles or candles[-1].get("close", 0) < close_above:
-                            logger.debug("%s latest candle close below %.2f — skipping", symbol, close_above)
-                            continue
-
-            result = place_trade(
-                symbol=symbol,
-                security_id=cond["security_id"],
-                transaction_type="BUY",
-                quantity=cond["quantity"],
-                entry_price=ltp,
-                stop_loss_price=cond["stop_loss_price"],
-                target_price=cond["target_price"],
-                thesis=cond["thesis"],
-            )
-            status = result.get("status", "unknown") if isinstance(result, dict) else str(result)
-            alerts.append(f"WATCH triggered {symbol} @ ₹{ltp:.2f} — {status}")
-            logger.info("Watchlist trade %s: %s", symbol, result)
-            watchlist.pop(symbol)
-            watchlist_dirty = True
-
-        if watchlist_dirty:
-            _save_watchlist(watchlist)
-
-    # ── 4. Soft triggers → Claude review ──────────────────────────────────
     if not is_eod:
-        trigger_alerts = _evaluate_triggers(now, tracked, live_symbols, day_pnl, ltp_cache)
+        trigger_alerts = _evaluate_triggers(now, tracked, live_symbols, day_pnl, ltp_cache, is_entry_window)
         alerts.extend(trigger_alerts)
 
     if alerts:
