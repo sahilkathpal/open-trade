@@ -742,6 +742,69 @@ def list_registered_strategies() -> list:
         return []
 
 
+# ── NSE market holidays ────────────────────────────────────────────────────────
+# Update this dict annually from NSE's official exchange holiday calendar:
+# https://www.nseindia.com/resources/exchange-communication-holidays
+NSE_HOLIDAYS: dict[str, str] = {
+    "2026-01-26": "Republic Day",
+    "2026-02-19": "Chhatrapati Shivaji Maharaj Jayanti",
+    "2026-03-17": "Holi",
+    "2026-04-02": "Ram Navami",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-10-20": "Dussehra (Vijayadashami)",
+    "2026-11-09": "Diwali Laxmi Pujan",
+    "2026-11-10": "Diwali-Balipratipada",
+    "2026-12-25": "Christmas",
+}
+
+
+def is_trading_day(date=None) -> bool:
+    """Return True if the given date (or today) is a weekday and not an NSE holiday."""
+    import pytz
+    from datetime import date as _date
+    if date is None:
+        date = datetime.now(pytz.timezone("Asia/Kolkata")).date()
+    if date.weekday() > 4:
+        return False
+    return date.isoformat() not in NSE_HOLIDAYS
+
+
+def check_market_holiday(date: str | None = None) -> dict:
+    """
+    Check whether a given date (YYYY-MM-DD) is an NSE trading day or a market holiday.
+    Defaults to today (IST) if no date provided.
+    """
+    import pytz
+    from datetime import date as _date
+    ist = pytz.timezone("Asia/Kolkata")
+    if date:
+        try:
+            d = _date.fromisoformat(date)
+        except ValueError:
+            return {"error": f"Invalid date format: {date!r}. Use YYYY-MM-DD."}
+    else:
+        d = datetime.now(ist).date()
+
+    date_str = d.isoformat()
+    is_weekend = d.weekday() > 4
+    holiday_name = NSE_HOLIDAYS.get(date_str)
+    trading = not is_weekend and holiday_name is None
+
+    result: dict = {
+        "date": date_str,
+        "weekday": d.strftime("%A"),
+        "is_trading_day": trading,
+    }
+    if is_weekend:
+        result["reason"] = "Weekend"
+    elif holiday_name:
+        result["reason"] = f"NSE holiday: {holiday_name}"
+
+    return result
+
+
 # ── tool executor ─────────────────────────────────────────────────────────────
 TOOL_FUNCTIONS = {
     "get_market_quote":      get_market_quote,
@@ -764,6 +827,7 @@ TOOL_FUNCTIONS = {
     "append_journal":             append_journal,
     "register_strategy":          register_strategy,
     "list_registered_strategies": list_registered_strategies,
+    "check_market_holiday":       check_market_holiday,
 }
 
 
@@ -1097,5 +1161,25 @@ ALL_TOOL_SCHEMAS = [
         "name": "list_registered_strategies",
         "description": "Return all strategies registered for the current user.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "check_market_holiday",
+        "description": (
+            "Check whether a given date is an NSE trading day or a market holiday. "
+            "Returns whether it is a trading day, the weekday name, and the holiday name if applicable. "
+            "Useful for pre-market checks (is today a holiday?), scheduling around holidays, "
+            "and answering user questions about upcoming trading days. "
+            "Defaults to today (IST) if no date is provided."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Date to check in YYYY-MM-DD format. Omit for today (IST).",
+                }
+            },
+            "required": [],
+        },
     },
 ]

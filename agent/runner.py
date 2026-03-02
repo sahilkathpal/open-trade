@@ -353,7 +353,12 @@ The user is talking to you through the open-trade web app. Here's what exists:
                                 "tool_use_id": block.id,
                                 "content": json.dumps({
                                     "status": "rejected",
-                                    "message": "User did not approve this action.",
+                                    "message": (
+                                        "User explicitly rejected this action. "
+                                        "Do NOT retry it or include the same change in a subsequent call. "
+                                        f"Rejected tool: {block.name}. "
+                                        f"Rejected inputs: {json.dumps(block.input, default=str)}"
+                                    ),
                                 }),
                             })
                             continue

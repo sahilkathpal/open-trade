@@ -22,8 +22,9 @@ def set_telegram_sender(fn):
 
 
 def _is_market_open() -> bool:
+    from agent.tools import is_trading_day
     now = datetime.now(IST)
-    if now.weekday() > 4:
+    if not is_trading_day(now.date()):
         return False
     market_open  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
     market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
