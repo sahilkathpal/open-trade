@@ -9,14 +9,16 @@ __pycache__/
 dist/
 build/
 
-# Agent runtime state — do not commit
-memory/PENDING.json
-memory/USAGE.json
+# All per-user memory directories (UIDs and "default")
+memory/*/
 
-# Agent-written memory files — commit only the .example templates
+# Root-level legacy single-user files (backwards compat)
 memory/MARKET.md
 memory/STRATEGY.md
 memory/JOURNAL.md
+memory/LEARNINGS.md
+memory/PENDING.json
+memory/USAGE.json
 
 # Agent runtime cache
 /tmp/dhan_instruments.csv

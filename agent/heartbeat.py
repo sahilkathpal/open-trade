@@ -2,10 +2,10 @@
 Deterministic heartbeat monitor — minimal LLM calls.
 
 Runs every 5 minutes during market hours. Checks:
-1. Daily loss limit
-2. Open position hard exits (stop loss / target / profit lock / EOD)
-3. Watchlist entry triggers (pure Python → place_trade)
-4. TRIGGERS.json soft conditions → invoke Claude only when a condition fires
+1. Token expiry
+2. Daily loss limit
+3. Open position hard exits (stop loss / target / profit lock)
+4. TRIGGERS.json — hard triggers execute directly, soft triggers invoke Claude
 
 Position metadata (entry, SL, target) is written to memory/{uid}/OPEN_POSITIONS.json
 by place_trade() and cleaned up by exit_position().
@@ -21,14 +21,12 @@ from agent.tools import (
     get_positions, get_market_quote, get_historical_data, get_funds,
     exit_position, place_trade,
     get_index_quote, load_triggers, _save_triggers, _load_agent_pnl,
+    _append_activity,
 )
 from agent.user_context import get_user_ctx
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = logging.getLogger(__name__)
-
-EOD_EXIT_HOUR = 15
-EOD_EXIT_MIN  = 10   # 3:10 PM IST — exit before 3:20 MIS auto-square-off
 
 
 def load_tracked_positions() -> dict:
@@ -110,6 +108,7 @@ def _evaluate_triggers(
                     exp = IST.localize(exp)
                 if now > exp:
                     logger.debug("Trigger %s expired — discarding", tid)
+                    _append_activity(f"TRIGGER EXPIRED id={tid} reason={reason}")
                     continue
             except Exception:
                 pass
@@ -268,28 +267,47 @@ def _evaluate_triggers(
         # ── fire ───────────────────────────────────────────────────────────
         if fired:
             logger.info("Trigger %s fired: %s", tid, context)
-            tmode = trigger.get("mode", "soft")
+            _append_activity(f"TRIGGER FIRED id={tid} mode={trigger.get('mode', 'soft')} context={context}")
+            tmode  = trigger.get("mode", "soft")
+            action = trigger.get("action", "place_trade")
             if tmode == "hard":
-                # Execute place_trade() directly — no LLM
-                symbol = trigger.get("symbol", "")
-                ltp    = ltp_cache.get(symbol)
-                try:
-                    result = place_trade(
-                        symbol=symbol,
-                        security_id=trigger["security_id"],
-                        transaction_type=trigger.get("transaction_type", "BUY"),
-                        quantity=trigger["quantity"],
-                        entry_price=ltp,
-                        stop_loss_price=trigger["stop_loss_price"],
-                        target_price=trigger["target_price"],
-                        thesis=trigger["thesis"],
-                    )
-                    status = result.get("status", "unknown") if isinstance(result, dict) else str(result)
-                    alerts.append(f"HARD TRIGGER [{tid}] {symbol} @ ₹{ltp:.2f} — {status}")
-                    logger.info("Hard trigger trade %s: %s", symbol, result)
-                except Exception as e:
-                    logger.error("Hard trigger %s: place_trade failed: %s", tid, e)
-                    alerts.append(f"HARD TRIGGER [{tid}] ERROR: {e}")
+                if action == "exit_all":
+                    # Exit all tracked positions — EOD hard exit
+                    tracked_for_exit = load_tracked_positions()
+                    if not tracked_for_exit:
+                        alerts.append(f"HARD TRIGGER [{tid}]: exit_all — no open positions")
+                    else:
+                        for sym, pos in tracked_for_exit.items():
+                            try:
+                                result = exit_position(
+                                    sym, pos["security_id"], pos["quantity"],
+                                    f"Hard trigger EOD exit [{tid}]"
+                                )
+                                logger.info("EOD exit %s: %s", sym, result)
+                            except Exception as e:
+                                logger.error("Hard trigger %s: exit_position %s failed: %s", tid, sym, e)
+                        alerts.append(f"HARD TRIGGER [{tid}]: exit all positions ({len(tracked_for_exit)} symbols)")
+                else:
+                    # action="place_trade" — execute trade directly
+                    symbol = trigger.get("symbol", "")
+                    ltp    = ltp_cache.get(symbol)
+                    try:
+                        result = place_trade(
+                            symbol=symbol,
+                            security_id=trigger["security_id"],
+                            transaction_type=trigger.get("transaction_type", "BUY"),
+                            quantity=trigger["quantity"],
+                            entry_price=ltp,
+                            stop_loss_price=trigger["stop_loss_price"],
+                            target_price=trigger["target_price"],
+                            thesis=trigger["thesis"],
+                        )
+                        status = result.get("status", "unknown") if isinstance(result, dict) else str(result)
+                        alerts.append(f"HARD TRIGGER [{tid}] {symbol} @ ₹{ltp:.2f} — {status}")
+                        logger.info("Hard trigger trade %s: %s", symbol, result)
+                    except Exception as e:
+                        logger.error("Hard trigger %s: place_trade failed: %s", tid, e)
+                        alerts.append(f"HARD TRIGGER [{tid}] ERROR: {e}")
             else:
                 try:
                     from agent.runner import run as agent_run
@@ -347,8 +365,6 @@ def run() -> str:
     if day_pnl < ctx.daily_loss_limit:
         return f"HALT: Daily loss limit breached. agent_pnl=₹{day_pnl:.2f}"
 
-    is_eod = (now.hour, now.minute) >= (EOD_EXIT_HOUR, EOD_EXIT_MIN)
-
     # ── 2. Open position hard exits ────────────────────────────────────────
     tracked = load_tracked_positions()
     live_symbols: set[str] = set()
@@ -383,12 +399,6 @@ def run() -> str:
 
             logger.debug("%s LTP=%.2f entry=%.2f SL=%.2f target=%.2f", symbol, ltp, entry, sl, target)
 
-            if is_eod:
-                result = exit_position(symbol, sec_id, qty, "MIS EOD exit — 3:10 PM IST")
-                alerts.append(f"EOD exit {symbol} @ ₹{ltp:.2f}")
-                logger.info("EOD exit %s: %s", symbol, result)
-                continue
-
             if ltp <= sl:
                 result = exit_position(symbol, sec_id, qty, f"Stop loss hit: LTP ₹{ltp:.2f} ≤ SL ₹{sl:.2f}")
                 alerts.append(f"SL hit {symbol}: exit @ ₹{ltp:.2f} (SL ₹{sl:.2f})")
@@ -408,10 +418,10 @@ def run() -> str:
                 continue
 
     # ── 3. Triggers (hard + soft) ──────────────────────────────────────────
-    is_entry_window = (9, 45) <= (now.hour, now.minute) < (EOD_EXIT_HOUR, EOD_EXIT_MIN)
-    if not is_eod:
-        trigger_alerts = _evaluate_triggers(now, tracked, live_symbols, day_pnl, ltp_cache, is_entry_window)
-        alerts.extend(trigger_alerts)
+    # Entry window for price_in_range triggers: 9:45 AM to 3:10 PM IST
+    is_entry_window = (9, 45) <= (now.hour, now.minute) < (15, 10)
+    trigger_alerts = _evaluate_triggers(now, tracked, live_symbols, day_pnl, ltp_cache, is_entry_window)
+    alerts.extend(trigger_alerts)
 
     if alerts:
         return "\n".join(alerts)

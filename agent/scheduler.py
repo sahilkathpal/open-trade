@@ -5,9 +5,6 @@ from datetime import datetime
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from agent.runner import run
-from agent.tools import get_pending_approvals, save_pending_approvals, _save_watchlist, _save_triggers, reset_agent_pnl
-
 logger = logging.getLogger(__name__)
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -74,69 +71,6 @@ async def _for_each_user(job_fn):
             reset_user_ctx(token)
 
 
-async def run_premarket():
-    """8:45 AM IST — deep pre-market analysis."""
-    logger.info("Running pre-market analysis...")
-
-    async def _run(ctx):
-        # Token expiry check — abort before wasting an LLM call
-        funds = ctx.dhan.get_funds()
-        if isinstance(funds, dict) and funds.get("token_expired"):
-            msg = "Pre-market skipped: Dhan access token has expired. Update it in Settings to resume trading."
-            logger.warning("%s uid=%s", msg, ctx.uid)
-            if _send_telegram and ctx.telegram_chat_id:
-                await _send_telegram(msg, chat_id=ctx.telegram_chat_id)
-            return
-
-        # Clear stale proposals, watchlist, triggers, and P&L from previous day
-        save_pending_approvals({})
-        _save_watchlist({})
-        _save_triggers([])
-        reset_agent_pnl()
-        try:
-            result = await asyncio.to_thread(run, "premarket")
-            if _send_telegram:
-                await _send_telegram(
-                    f"Pre-market complete\n\n{result[:1000]}...",
-                    chat_id=ctx.telegram_chat_id,
-                )
-        except Exception as e:
-            logger.error("Pre-market job failed for %s: %s", ctx.uid, e, exc_info=True)
-            if _send_telegram and ctx.telegram_chat_id:
-                await _send_telegram(f"Pre-market job failed: {e}", chat_id=ctx.telegram_chat_id)
-
-    await _for_each_user(_run)
-
-
-async def run_execution():
-    """9:35 AM IST — first candle closed, set entry levels and propose trades."""
-    logger.info("Running execution planning...")
-
-    async def _run(ctx):
-        # Token expiry check
-        funds = ctx.dhan.get_funds()
-        if isinstance(funds, dict) and funds.get("token_expired"):
-            msg = "Execution skipped: Dhan access token has expired. Update it in Settings to resume trading."
-            logger.warning("%s uid=%s", msg, ctx.uid)
-            if _send_telegram and ctx.telegram_chat_id:
-                await _send_telegram(msg, chat_id=ctx.telegram_chat_id)
-            return
-
-        try:
-            result = await asyncio.to_thread(run, "execution")
-            if _send_telegram and ctx.telegram_chat_id:
-                await _send_telegram(
-                    f"Execution plan ready\n\n{result[:1000]}",
-                    chat_id=ctx.telegram_chat_id,
-                )
-        except Exception as e:
-            logger.error("Execution job failed for %s: %s", ctx.uid, e, exc_info=True)
-            if _send_telegram and ctx.telegram_chat_id:
-                await _send_telegram(f"Execution job failed: {e}", chat_id=ctx.telegram_chat_id)
-
-    await _for_each_user(_run)
-
-
 async def run_heartbeat():
     """Every 5 minutes — position monitoring during market hours. Pure Python, no LLM."""
     if not _is_market_open():
@@ -162,80 +96,46 @@ async def run_heartbeat():
     await _for_each_user(_run)
 
 
-async def clear_proposals():
-    """3:20 PM IST — MIS auto-square-off. Clear all stale intraday proposals."""
-
-    async def _run(ctx):
-        pending = get_pending_approvals()
-        cleared = list(pending.keys())
-        if cleared:
-            save_pending_approvals({})
-            logger.info("Cleared %d stale proposal(s): %s", len(cleared), ", ".join(cleared))
-            if _send_telegram and ctx.telegram_chat_id:
-                await _send_telegram(
-                    f"Market closed. Cleared {len(cleared)} pending proposal(s): {', '.join(cleared)}",
-                    chat_id=ctx.telegram_chat_id,
-                )
-        else:
-            logger.info("Proposal clear at 3:20 PM — nothing pending.")
-
-    await _for_each_user(_run)
-
-
-async def run_eod():
-    """3:35 PM IST — end of day review and journal."""
-    logger.info("Running EOD report...")
-
-    async def _run(ctx):
-        # Token expiry check
-        funds = ctx.dhan.get_funds()
-        if isinstance(funds, dict) and funds.get("token_expired"):
-            msg = "EOD skipped: Dhan access token has expired. Update it in Settings to resume trading."
-            logger.warning("%s uid=%s", msg, ctx.uid)
-            if _send_telegram and ctx.telegram_chat_id:
-                await _send_telegram(msg, chat_id=ctx.telegram_chat_id)
-            return
-
-        try:
-            result = await asyncio.to_thread(run, "eod")
-            if _send_telegram and ctx.telegram_chat_id:
-                await _send_telegram(
-                    f"EOD Report\n\n{result[:2000]}",
-                    chat_id=ctx.telegram_chat_id,
-                )
-        except Exception as e:
-            logger.error("EOD job failed for %s: %s", ctx.uid, e, exc_info=True)
-            if _send_telegram and ctx.telegram_chat_id:
-                await _send_telegram(f"EOD job failed: {e}", chat_id=ctx.telegram_chat_id)
-
-    await _for_each_user(_run)
-
-
 def setup_scheduler():
-    """Register all cron jobs and return the scheduler."""
-    scheduler.add_job(
-        run_premarket, "cron",
-        day_of_week="mon-fri", hour=8, minute=45,
-        id="premarket", replace_existing=True,
-    )
-    scheduler.add_job(
-        run_execution, "cron",
-        day_of_week="mon-fri", hour=9, minute=35,
-        id="execution", replace_existing=True,
-    )
+    """
+    Register the heartbeat default job and load all users' Claude-owned schedules.
+
+    Only the heartbeat runs as infrastructure. All other jobs (premarket, execution,
+    eod, custom) are created by Claude via write_schedule() and stored in
+    memory/{uid}/SCHEDULE.json.
+    """
+    from agent.schedule_manager import ScheduleManager, set_schedule_manager
+    from agent.firestore import is_enabled, get_all_users
+    from agent.user_context import _get_default_ctx
+
+    # Heartbeat default: minimum cadence, always running.
+    # If a user's SCHEDULE.json has job_type="heartbeat", it overrides this cadence.
     scheduler.add_job(
         run_heartbeat, "interval",
         minutes=1,
         id="heartbeat", replace_existing=True,
     )
-    scheduler.add_job(
-        clear_proposals, "cron",
-        day_of_week="mon-fri", hour=15, minute=20,
-        id="clear_proposals", replace_existing=True,
-    )
-    scheduler.add_job(
-        run_eod, "cron",
-        day_of_week="mon-fri", hour=15, minute=35,
-        id="eod", replace_existing=True,
-    )
+
+    # Create ScheduleManager and register it as singleton
+    mgr = ScheduleManager(scheduler)
+    set_schedule_manager(mgr)
+
+    # Load Claude-owned schedules for all users
+    if is_enabled():
+        try:
+            users = get_all_users()
+            for user_doc in users:
+                uid = user_doc.get("uid")
+                if uid:
+                    mgr.load_user_schedules(uid)
+        except Exception as e:
+            logger.warning("Could not load user schedules from Firestore: %s", e)
+    else:
+        # Single-user fallback: load default user schedules
+        try:
+            ctx = _get_default_ctx()
+            mgr.load_user_schedules(ctx.uid)
+        except Exception as e:
+            logger.warning("Could not load default user schedules: %s", e)
+
     return scheduler

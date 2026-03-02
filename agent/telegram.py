@@ -49,7 +49,6 @@ _COMMANDS = [
     ("status",    "Pending trade proposals"),
     ("positions", "Open positions with P&L"),
     ("funds",     "Available balance"),
-    ("watchlist", "Stocks being watched today"),
     ("triggers",  "Active monitoring triggers"),
     ("pause",     "Pause the vibe-trade agent"),
     ("resume",    "Resume the vibe-trade agent"),
@@ -66,7 +65,6 @@ def setup_telegram() -> Application:
     _app.add_handler(CommandHandler("status",    _handle_status))
     _app.add_handler(CommandHandler("positions", _handle_positions))
     _app.add_handler(CommandHandler("funds",     _handle_funds))
-    _app.add_handler(CommandHandler("watchlist", _handle_watchlist))
     _app.add_handler(CommandHandler("triggers",  _handle_triggers))
     _app.add_handler(CommandHandler("pause",     _handle_pause))
     _app.add_handler(CommandHandler("resume",    _handle_resume))
@@ -162,7 +160,6 @@ async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/status — pending proposals\n"
         f"/positions — open positions with P&L\n"
         f"/funds — available balance\n"
-        f"/watchlist — stocks being watched today\n"
         f"/triggers — active monitoring triggers\n"
         f"/pause — pause the vibe-trade agent\n"
         f"/resume — resume the vibe-trade agent\n"
@@ -277,28 +274,6 @@ async def _handle_funds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         reset_user_ctx(token)
 
-
-async def _handle_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    ctx, err = _require_ctx(chat_id)
-    if err:
-        await update.message.reply_text(err)
-        return
-
-    from agent.user_context import set_user_ctx, reset_user_ctx
-    token = set_user_ctx(ctx)
-    try:
-        from agent.tools import load_watchlist
-        wl = load_watchlist()
-        if not wl:
-            await update.message.reply_text("Watchlist is empty.")
-        else:
-            lines = [f"Watchlist ({len(wl)} stocks):"]
-            for sym, e in wl.items():
-                lines.append(f"- {sym}: ₹{e['entry_min']}–₹{e['entry_max']} | SL ₹{e['stop_loss_price']} | Target ₹{e['target_price']}")
-            await update.message.reply_text("\n".join(lines))
-    finally:
-        reset_user_ctx(token)
 
 
 async def _handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -461,7 +436,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await update.message.reply_text(
-            "Commands: /status, /positions, /funds, /watchlist, /triggers, /pause, /resume\n"
+            "Commands: /status, /positions, /funds, /triggers, /pause, /resume\n"
             "/run catchup, /exit SYMBOL\n"
             "approve SYMBOL, deny SYMBOL"
         )

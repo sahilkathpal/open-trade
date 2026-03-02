@@ -1,7 +1,7 @@
 # Strategy Evolution
 
-*This file is owned by the agent. Read it before every session, update it EOD.*
-*Copy this file to STRATEGY.md to initialise: `cp memory/STRATEGY.md.example memory/STRATEGY.md`*
+*This file is an example of what STRATEGY.md looks like for an intraday momentum strategy.*
+*Claude creates STRATEGY.md directly from your first strategy conversation — no manual setup needed.*
 
 ---
 

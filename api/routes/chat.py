@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated
 
@@ -152,19 +153,6 @@ def _build_status_context(strategy: str) -> str:
         else:
             lines.append("Positions: none open")
 
-        # ── Watchlist ─────────────────────────────────────────────────────
-        wl_path = ctx.memory_dir / "WATCHLIST.json"
-        if wl_path.exists():
-            try:
-                wl = _json.loads(wl_path.read_text())
-                symbols = list(wl.keys())
-                if symbols:
-                    lines.append(f"Watchlist ({len(symbols)}): {', '.join(symbols)}")
-                else:
-                    lines.append("Watchlist: empty")
-            except Exception:
-                pass
-
         # ── Pending approvals ─────────────────────────────────────────────
         pending_path = ctx.memory_dir / "PENDING.json"
         if pending_path.exists():
@@ -270,6 +258,20 @@ async def chat_websocket(
 
             status_context = _build_status_context(strategy)
 
+            # ── Permission coordination ────────────────────────────────────
+            # Maps request_id -> (Event, result dict)
+            permission_gates: dict[str, tuple[threading.Event, dict]] = {}
+
+            def permission_callback(request_id: str, tool: str, inputs: dict) -> bool:
+                """Called from the agent thread. Blocks until the user responds."""
+                event = threading.Event()
+                result = {"approved": False}
+                permission_gates[request_id] = (event, result)
+                # The permission_request event is yielded by runner and forwarded
+                # to the frontend by the queue drain loop below.
+                event.wait(timeout=120)  # 2 min timeout
+                return result["approved"]
+
             # ── Run agent in thread pool ──────────────────────────────────────
             queue: asyncio.Queue = asyncio.Queue()
             response_parts: list[str] = []
@@ -289,6 +291,7 @@ async def chat_websocket(
                         history=history_,
                         strategy=strategy_,
                         status_context=status_context_,
+                        permission_callback=permission_callback,
                     ):
                         loop.call_soon_threadsafe(queue.put_nowait, event)
                 except Exception as e:
@@ -301,14 +304,43 @@ async def chat_websocket(
 
             future = loop.run_in_executor(_executor, _run_in_thread)
 
-            # Drain queue and forward to WebSocket
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-                await websocket.send_json(event)
-                if event.get("type") == "token":
-                    response_parts.append(event.get("content", ""))
+            # Drain queue and forward to WebSocket.
+            # Also listen for incoming permission responses from the frontend.
+            agent_done = False
+            while not agent_done:
+                queue_task = asyncio.ensure_future(queue.get())
+                recv_task = asyncio.ensure_future(websocket.receive_json())
+
+                done, pending = await asyncio.wait(
+                    {queue_task, recv_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                for task in pending:
+                    task.cancel()
+
+                for task in done:
+                    if task is queue_task:
+                        event = task.result()
+                        if event is None:
+                            agent_done = True
+                            break
+                        await websocket.send_json(event)
+                        if event.get("type") == "token":
+                            response_parts.append(event.get("content", ""))
+                    elif task is recv_task:
+                        try:
+                            client_msg = task.result()
+                        except (WebSocketDisconnect, Exception):
+                            agent_done = True
+                            break
+                        if client_msg.get("type") == "permission_response":
+                            req_id = client_msg.get("id", "")
+                            approved = client_msg.get("approved", False)
+                            gate = permission_gates.get(req_id)
+                            if gate:
+                                gate[1]["approved"] = approved
+                                gate[0].set()
 
             await future  # propagate any thread exceptions
 

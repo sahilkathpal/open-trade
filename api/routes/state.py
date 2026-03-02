@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from api.auth import get_current_uid
-from agent.tools import get_funds, get_positions, get_pending_approvals, load_watchlist, load_triggers, _load_agent_pnl
+from agent.tools import get_funds, get_positions, get_pending_approvals, load_triggers, _load_agent_pnl
 from agent.heartbeat import load_tracked_positions
 from agent.scheduler import _is_market_open, scheduler
 from api.token_usage import get_today as get_today_usage, get_all as get_all_usage
@@ -135,28 +135,28 @@ def get_state(uid: Annotated[str, Depends(get_current_uid)]):
             from datetime import datetime
             import pytz
             now = datetime.now(pytz.timezone("Asia/Kolkata"))
-            market_md = ctx.memory_dir / "MARKET.md"
-            if not market_md.exists():
+            # Catchup is available if no scheduled jobs have run today.
+            # Use the heartbeat's last_heartbeat timestamp as a proxy — if it's
+            # never run or hasn't run today, no analysis has happened.
+            last_hb = _scheduler_status.get("last_heartbeat")
+            if not last_hb:
                 catchup_available = True
             else:
-                content = market_md.read_text()
-                # Agent may write the date in any format — check common variants
-                date_variants = [
-                    now.strftime("%Y-%m-%d"),       # 2026-02-26
-                    now.strftime("%d %B %Y"),        # 26 February 2026
-                    now.strftime("%d %b %Y"),        # 26 Feb 2026
-                    now.strftime("%B %d, %Y"),       # February 26, 2026
-                    now.strftime("%b %d, %Y"),       # Feb 26, 2026
-                    now.strftime("%d/%m/%Y"),         # 26/02/2026
-                ]
-                if not any(v in content for v in date_variants):
+                try:
+                    from datetime import datetime as _dt
+                    import pytz as _pytz
+                    _ist = _pytz.timezone("Asia/Kolkata")
+                    last_hb_dt = _dt.fromisoformat(last_hb)
+                    if last_hb_dt.tzinfo is None:
+                        last_hb_dt = _ist.localize(last_hb_dt)
+                    catchup_available = last_hb_dt.date() < now.date()
+                except Exception:
                     catchup_available = True
 
         return {
             "capital":           capital,
             "positions":         positions,
             "pending_approvals": get_pending_approvals(),
-            "watchlist":         load_watchlist(),
             "triggers":          load_triggers(),
             "market_open":       _is_market_open(),
             "scheduler_status":  _scheduler_status,

@@ -42,20 +42,6 @@ export interface AppState {
   seed_capital?: number
   autonomous?: boolean
   paused?: boolean
-  watchlist: Record<
-    string,
-    {
-      security_id: string
-      entry_min: number
-      entry_max: number
-      stop_loss_price: number
-      target_price: number
-      quantity: number
-      thesis: string
-      rsi_max?: number
-      candle_close_above?: number
-    }
-  >
   triggers: Array<{
     id: string
     type: string
@@ -91,7 +77,7 @@ export const STRATEGY_CONFIGS: Record<string, StrategyConfig> = {
     name: "Intraday Momentum",
     live: true,
     goal:
-      "Trade NSE large-cap stocks intraday using momentum strategies. Claude screens pre-market, builds a watchlist, sets price triggers, and executes entries — exiting all positions by 3:10 PM.",
+      "Trade NSE large-cap stocks intraday using momentum strategies. Claude screens pre-market, sets price triggers, and executes entries — exiting all positions by 3:10 PM.",
     subtitle: "NSE large-cap · MIS · exits by 3:10 PM",
     documents: [
       {

@@ -14,8 +14,19 @@ from agent.user_context import get_user_ctx
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_READ  = {"MARKET.md", "STRATEGY.md", "JOURNAL.md", "HEARTBEAT.md", "SOUL.md"}
-ALLOWED_WRITE = {"MARKET.md", "STRATEGY.md"}
+_SHARED_READONLY = {"SOUL.md", "HEARTBEAT.md"}
+
+
+def _append_activity(entry: str):
+    """Append a timestamped line to the user's ACTIVITY.md."""
+    try:
+        ts = datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        path = get_user_ctx().memory_dir / "ACTIVITY.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(f"- [{ts}] {entry}\n")
+    except Exception as e:
+        logger.debug("Failed to append activity: %s", e)
 
 
 # ── per-user path helpers ──────────────────────────────────────────────────────
@@ -26,8 +37,6 @@ def _pending_path() -> Path:
 def _positions_path() -> Path:
     return get_user_ctx().memory_dir / "OPEN_POSITIONS.json"
 
-def _watchlist_path() -> Path:
-    return get_user_ctx().memory_dir / "WATCHLIST.json"
 
 def _triggers_path() -> Path:
     return get_user_ctx().memory_dir / "TRIGGERS.json"
@@ -42,7 +51,23 @@ def get_pending_approvals() -> dict:
     path = _pending_path()
     if path.exists():
         try:
-            return json.loads(path.read_text())
+            data = json.loads(path.read_text())
+            now = datetime.now(_IST)
+            active = {}
+            for symbol, proposal in data.items():
+                exp_str = proposal.get("expires_at", "")
+                if exp_str:
+                    try:
+                        exp = datetime.fromisoformat(exp_str)
+                        if exp.tzinfo is None:
+                            exp = _IST.localize(exp)
+                        if now > exp:
+                            logger.debug("Proposal %s expired — discarding", symbol)
+                            continue
+                    except Exception:
+                        pass
+                active[symbol] = proposal
+            return active
         except Exception:
             pass
     return {}
@@ -71,23 +96,6 @@ def _save_open_positions(data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2))
 
-
-# ── watchlist helpers ──────────────────────────────────────────────────────────
-
-def load_watchlist() -> dict:
-    path = _watchlist_path()
-    if path.exists():
-        try:
-            return json.loads(path.read_text())
-        except Exception:
-            pass
-    return {}
-
-
-def _save_watchlist(data: dict):
-    path = _watchlist_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
 
 
 # ── trigger helpers ────────────────────────────────────────────────────────────
@@ -282,8 +290,20 @@ def place_trade(
     thesis: str,
     target_price: float = 0.0,
     approved: bool = False,
+    expires_at: str = "",
 ) -> dict:
     ctx = get_user_ctx()
+
+    # 0. Reject stale approvals
+    if approved and expires_at:
+        try:
+            exp = datetime.fromisoformat(expires_at)
+            if exp.tzinfo is None:
+                exp = _IST.localize(exp)
+            if datetime.now(_IST) > exp:
+                return {"status": "rejected", "reason": f"Proposal expired at {expires_at}"}
+        except Exception:
+            pass
 
     # 1. Always run risk validation first
     funds = ctx.dhan.get_funds()
@@ -302,6 +322,10 @@ def place_trade(
     if not approved and not ctx.autonomous:
         proposal = _fmt_proposal(symbol, quantity, entry_price, stop_loss_price,
                                   target_price or entry_price * 1.04, thesis)
+        # Expiry: Claude-provided value, or default to 15:00 IST same day
+        today = datetime.now(_IST)
+        default_expiry = today.replace(hour=15, minute=0, second=0, microsecond=0).isoformat()
+        expiry = expires_at if expires_at else default_expiry
         pending = get_pending_approvals()
         pending[symbol] = {
             "symbol": symbol,
@@ -312,8 +336,13 @@ def place_trade(
             "stop_loss_price": stop_loss_price,
             "thesis": thesis,
             "target_price": target_price,
+            "expires_at": expiry,
         }
         save_pending_approvals(pending)
+        _append_activity(
+            f"TRADE QUEUED {transaction_type} {symbol} qty={quantity} "
+            f"entry=₹{entry_price:.2f} sl=₹{stop_loss_price:.2f} (pending approval)"
+        )
         try:
             from agent.telegram import notify_proposal_sync
             rr = round((target_price - entry_price) / (entry_price - stop_loss_price), 1) if entry_price != stop_loss_price else 0
@@ -391,6 +420,11 @@ def place_trade(
     except Exception as e:
         logger.warning("Failed to record tracked symbol %s: %s", symbol, e)
 
+    _append_activity(
+        f"TRADE PLACED {transaction_type} {symbol} qty={quantity} "
+        f"entry=₹{entry_price:.2f} sl=₹{stop_loss_price:.2f} target=₹{target_price:.2f}"
+    )
+
     return {
         "status":      "placed",
         "symbol":      symbol,
@@ -423,6 +457,7 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> 
 
         open_positions.pop(symbol, None)
         _save_open_positions(open_positions)
+        _append_activity(f"EXIT {symbol} qty={quantity} reason={reason}")
         try:
             from api import activity_log
             activity_log.emit({"type": "trade", "symbol": symbol, "summary": f"EXIT {symbol}: {reason}"})
@@ -432,44 +467,6 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> 
     except Exception as e:
         return {"error": str(e)}
 
-
-def add_to_watchlist(
-    symbol: str,
-    security_id: str,
-    entry_min: float,
-    entry_max: float,
-    stop_loss_price: float,
-    target_price: float,
-    quantity: int,
-    thesis: str,
-    rsi_max: float = None,
-    candle_close_above: float = None,
-) -> dict:
-    """Register a stock for price-triggered intraday entry."""
-    watchlist = load_watchlist()
-    watchlist[symbol] = {
-        "security_id":        security_id,
-        "entry_min":          entry_min,
-        "entry_max":          entry_max,
-        "stop_loss_price":    stop_loss_price,
-        "target_price":       target_price,
-        "quantity":           quantity,
-        "thesis":             thesis,
-        "rsi_max":            rsi_max,
-        "candle_close_above": candle_close_above,
-    }
-    _save_watchlist(watchlist)
-    return {"status": "added", "symbol": symbol, "entry_range": f"₹{entry_min}–₹{entry_max}"}
-
-
-def remove_from_watchlist(symbol: str) -> dict:
-    """Remove a stock from the intraday watchlist."""
-    watchlist = load_watchlist()
-    if symbol in watchlist:
-        watchlist.pop(symbol)
-        _save_watchlist(watchlist)
-        return {"status": "removed", "symbol": symbol}
-    return {"status": "not_found", "symbol": symbol}
 
 
 def get_index_quote(index: str = "NIFTY50") -> dict:
@@ -486,6 +483,7 @@ def write_trigger(
     reason: str,
     expires_at: str,
     mode: str = "soft",
+    action: str = "place_trade",
     symbol: str = None,
     threshold: float = None,
     at: str = None,
@@ -507,8 +505,11 @@ def write_trigger(
     Set a monitoring trigger. The heartbeat evaluates all triggers every 5 minutes.
 
     mode="soft" (default): invokes the Claude agent when the condition fires.
-    mode="hard": executes place_trade() directly (no LLM) — use for price-triggered entries
-                 where you've already decided the trade parameters.
+    mode="hard": executes an action directly (no LLM).
+      action="place_trade" (default): executes place_trade() — requires type="price_in_range"
+        plus all trade fields.
+      action="exit_all": exits all open positions — use for EOD hard exits. Works with
+        any trigger type (typically type="time").
     """
     SYMBOL_REQUIRED_TYPES = {
         "price_above", "price_below",
@@ -520,14 +521,18 @@ def write_trigger(
     if type in SYMBOL_REQUIRED_TYPES and not symbol:
         return {"error": f"'symbol' is required for trigger type '{type}'"}
 
+    if action not in ("place_trade", "exit_all"):
+        return {"error": f"Invalid action '{action}'. Must be 'place_trade' or 'exit_all'"}
+
     if mode == "hard":
-        if type != "price_in_range":
-            return {"error": "Hard triggers must use type='price_in_range'"}
-        missing = [f for f in ["security_id", "transaction_type", "entry_min", "entry_max",
-                                "stop_loss_price", "target_price", "quantity", "thesis"]
-                   if locals()[f] is None]
-        if missing:
-            return {"error": f"Hard trigger missing required fields: {', '.join(missing)}"}
+        if action == "place_trade":
+            if type != "price_in_range":
+                return {"error": "Hard place_trade triggers must use type='price_in_range'"}
+            missing = [f for f in ["security_id", "transaction_type", "entry_min", "entry_max",
+                                    "stop_loss_price", "target_price", "quantity", "thesis"]
+                       if locals()[f] is None]
+            if missing:
+                return {"error": f"Hard trigger missing required fields: {', '.join(missing)}"}
 
     if type == "time" and not at:
         return {"error": "'at' is required for type='time' (format: HH:MM IST, 24-hour)"}
@@ -547,7 +552,7 @@ def write_trigger(
 
     triggers = load_triggers()
     triggers = [t for t in triggers if t.get("id") != id]
-    trigger = {"id": id, "type": type, "mode": mode, "reason": reason, "expires_at": expires_at}
+    trigger = {"id": id, "type": type, "mode": mode, "action": action, "reason": reason, "expires_at": expires_at}
     if symbol is not None:           trigger["symbol"]              = symbol
     if threshold is not None:        trigger["threshold"]            = threshold
     if at is not None:               trigger["at"]                   = at
@@ -565,6 +570,11 @@ def write_trigger(
     if candle_close_above is not None: trigger["candle_close_above"] = candle_close_above
     triggers.append(trigger)
     _save_triggers(triggers)
+    parts = [f"TRIGGER SET id={id} type={type} mode={mode}"]
+    if symbol:
+        parts.append(f"symbol={symbol}")
+    parts.append(f"reason={reason}")
+    _append_activity(" ".join(parts))
     return {"status": "ok", "trigger_id": id, "type": type, "mode": mode}
 
 
@@ -597,11 +607,82 @@ def list_triggers() -> list:
     return active
 
 
+def write_schedule(
+    id: str,
+    cron: str,
+    job_type: str,
+    reason: str,
+    prompt: str = "",
+) -> dict:
+    """
+    Create or update a recurring scheduled job. Stored in memory/{uid}/SCHEDULE.json
+    and registered in APScheduler immediately.
+    """
+    from agent.schedule_manager import get_schedule_manager, _load_schedule, _save_schedule
+    ctx = get_user_ctx()
+    uid = ctx.uid
+
+    # Validate cron (5 fields)
+    if len(cron.strip().split()) != 5:
+        return {"error": f"Invalid cron expression '{cron}'. Must be 5 fields: minute hour dom month dow"}
+
+    if job_type != "custom":
+        return {"error": "job_type must be 'custom'. All scheduled jobs use Claude-authored prompts."}
+
+    if not prompt:
+        return {"error": "prompt is required. Write the full instruction for what Claude should do when this job fires."}
+
+    entry = {
+        "id": id,
+        "cron": cron,
+        "job_type": job_type,
+        "reason": reason,
+        "prompt": prompt,
+        "created_at": datetime.now(_IST).isoformat(),
+    }
+
+    entries = _load_schedule(uid)
+    entries = [e for e in entries if e.get("id") != id]
+    entries.append(entry)
+    _save_schedule(uid, entries)
+
+    mgr = get_schedule_manager()
+    if mgr:
+        mgr.add_job(uid, entry)
+
+    return {"status": "ok", "schedule_id": id, "cron": cron, "job_type": job_type}
+
+
+def remove_schedule(id: str) -> dict:
+    """Remove a scheduled job by id."""
+    from agent.schedule_manager import get_schedule_manager, _load_schedule, _save_schedule
+    ctx = get_user_ctx()
+    uid = ctx.uid
+
+    entries = _load_schedule(uid)
+    before = len(entries)
+    entries = [e for e in entries if e.get("id") != id]
+    _save_schedule(uid, entries)
+
+    mgr = get_schedule_manager()
+    if mgr:
+        mgr.remove_job(uid, id)
+
+    removed = len(entries) < before
+    return {"status": "removed" if removed else "not_found", "schedule_id": id}
+
+
+def list_schedules() -> list:
+    """Return all schedule entries for the current user."""
+    from agent.schedule_manager import _load_schedule
+    ctx = get_user_ctx()
+    return _load_schedule(ctx.uid)
+
+
 def read_memory(filename: str) -> str:
-    if filename not in ALLOWED_READ:
-        return f"Error: {filename} not in allowed list {ALLOWED_READ}"
-    # SOUL.md and HEARTBEAT.md are shared (project-level)
-    if filename in ("SOUL.md", "HEARTBEAT.md"):
+    if not filename.endswith(".md"):
+        return "Error: only .md files are readable"
+    if filename in _SHARED_READONLY:
         path = Path("memory") / filename
     else:
         path = _memory_dir() / filename
@@ -611,8 +692,10 @@ def read_memory(filename: str) -> str:
 
 
 def write_memory(filename: str, content: str) -> dict:
-    if filename not in ALLOWED_WRITE:
-        return {"error": f"{filename} not in allowed write list {ALLOWED_WRITE}"}
+    if not filename.endswith(".md"):
+        return {"error": "Only .md files are allowed"}
+    if filename in _SHARED_READONLY:
+        return {"error": f"{filename} is a shared read-only file"}
     path = _memory_dir() / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
@@ -638,11 +721,12 @@ TOOL_FUNCTIONS = {
     "get_index_quote":       get_index_quote,
     "place_trade":           place_trade,
     "exit_position":         exit_position,
-    "add_to_watchlist":      add_to_watchlist,
-    "remove_from_watchlist": remove_from_watchlist,
     "write_trigger":         write_trigger,
     "remove_trigger":        remove_trigger,
     "list_triggers":         list_triggers,
+    "write_schedule":        write_schedule,
+    "remove_schedule":       remove_schedule,
+    "list_schedules":        list_schedules,
     "read_memory":           read_memory,
     "write_memory":          write_memory,
     "append_journal":        append_journal,
@@ -759,6 +843,7 @@ ALL_TOOL_SCHEMAS = [
                 "thesis":           {"type": "string", "description": "1-2 sentence trade thesis"},
                 "target_price":     {"type": "number", "description": "Estimated target price for R:R calculation"},
                 "approved":         {"type": "boolean", "default": False},
+                "expires_at":       {"type": "string", "description": "ISO 8601 datetime when this proposal expires. Defaults to 15:00 IST today for intraday MIS trades. Set later for CNC/delivery trades or when the entry window extends beyond 3 PM."},
             },
             "required": ["symbol", "security_id", "transaction_type", "quantity",
                          "entry_price", "stop_loss_price", "thesis"],
@@ -780,13 +865,19 @@ ALL_TOOL_SCHEMAS = [
     },
     {
         "name": "read_memory",
-        "description": "Read a memory file (MARKET.md, STRATEGY.md, JOURNAL.md, HEARTBEAT.md, or SOUL.md).",
+        "description": (
+            "Read a per-user memory file. Any .md filename is allowed. "
+            "SOUL.md and HEARTBEAT.md are shared system files (read-only, served from project root). "
+            "All other .md files are read from the per-user memory directory. "
+            "Universal files: STRATEGY.md, JOURNAL.md, LEARNINGS.md. "
+            "Strategy-specific files (e.g. HOLDINGS.md, MARKET.md, THESIS.md) are created by Claude as needed."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "filename": {
                     "type": "string",
-                    "enum": ["MARKET.md", "STRATEGY.md", "JOURNAL.md", "HEARTBEAT.md", "SOUL.md"],
+                    "description": "Any .md filename (e.g. STRATEGY.md, JOURNAL.md, HOLDINGS.md). Must end in .md.",
                 }
             },
             "required": ["filename"],
@@ -794,11 +885,19 @@ ALL_TOOL_SCHEMAS = [
     },
     {
         "name": "write_memory",
-        "description": "Overwrite MARKET.md or STRATEGY.md with new content.",
+        "description": (
+            "Write or overwrite a per-user memory file. Any .md filename is allowed except "
+            "SOUL.md and HEARTBEAT.md (shared read-only system files). "
+            "Universal files: STRATEGY.md, JOURNAL.md, LEARNINGS.md. "
+            "Strategy-specific files (e.g. HOLDINGS.md, MARKET.md, THESIS.md) can be created freely."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "filename": {"type": "string", "enum": ["MARKET.md", "STRATEGY.md"]},
+                "filename": {
+                    "type": "string",
+                    "description": "Any .md filename. Must end in .md. SOUL.md and HEARTBEAT.md are not writable.",
+                },
                 "content":  {"type": "string"},
             },
             "required": ["filename", "content"],
@@ -837,14 +936,17 @@ ALL_TOOL_SCHEMAS = [
             "Triggers are one-shot — they fire once and are removed. If you are invoked "
             "by a trigger and decide not to act, re-call write_trigger to keep monitoring.\n\n"
             "mode='soft' (default): invokes the Claude agent when the condition fires.\n"
-            "mode='hard': executes place_trade() directly — use when you've already decided "
-            "the trade and just need a price-triggered entry. Requires type='price_in_range' "
-            "plus all trade fields (security_id, transaction_type, entry_min, entry_max, "
-            "stop_loss_price, target_price, quantity, thesis). Optional: rsi_max, candle_close_above.\n\n"
+            "mode='hard': executes an action directly (no LLM):\n"
+            "  action='place_trade' (default): executes place_trade() — requires type='price_in_range' "
+            "  plus all trade fields (security_id, transaction_type, entry_min, entry_max, "
+            "  stop_loss_price, target_price, quantity, thesis). Optional: rsi_max, candle_close_above.\n"
+            "  action='exit_all': exits all open positions — use for EOD hard exits. Works with "
+            "  any trigger type, typically type='time'. Example: set eod-exit trigger each morning "
+            "  with type='time', at='15:10', mode='hard', action='exit_all'.\n\n"
             "Soft trigger types: time (at), price_above/below (symbol, threshold), "
             "index_above/below (symbol, threshold), near_stop/near_target (symbol, buffer_pct), "
             "day_pnl_above/below (threshold), position_pnl_pct (symbol, above_pct).\n\n"
-            "Always set expires_at to today 15:00 IST."
+            "Always set expires_at to today 15:00 IST (or today 23:59 for EOD exit triggers)."
         ),
         "input_schema": {
             "type": "object",
@@ -858,14 +960,16 @@ ALL_TOOL_SCHEMAS = [
                     "position_pnl_pct",
                 ]},
                 "mode":       {"type": "string", "enum": ["soft", "hard"], "default": "soft"},
+                "action":     {"type": "string", "enum": ["place_trade", "exit_all"], "default": "place_trade",
+                               "description": "What to do when this hard trigger fires. 'place_trade' (default) or 'exit_all' (EOD exit)."},
                 "reason":     {"type": "string"},
-                "expires_at": {"type": "string", "description": "ISO 8601 datetime, today 15:00 IST"},
+                "expires_at": {"type": "string", "description": "ISO 8601 datetime. Today 15:00 IST for most triggers; today 23:59 IST for EOD exit triggers."},
                 "symbol":     {"type": "string"},
                 "threshold":  {"type": "number"},
                 "at":         {"type": "string", "description": "'HH:MM' IST"},
                 "buffer_pct": {"type": "number"},
                 "above_pct":  {"type": "number"},
-                # hard-trigger fields
+                # hard-trigger fields (action="place_trade")
                 "security_id":        {"type": "string"},
                 "transaction_type":   {"type": "string", "enum": ["BUY", "SELL"]},
                 "entry_min":          {"type": "number"},
@@ -892,6 +996,45 @@ ALL_TOOL_SCHEMAS = [
     {
         "name": "list_triggers",
         "description": "Return all currently active monitoring triggers.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "write_schedule",
+        "description": (
+            "Create or update a recurring scheduled job. The job is stored in SCHEDULE.json "
+            "and registered in APScheduler immediately — it will fire on every matching cron slot.\n\n"
+            "All scheduled jobs are job_type='custom'. You write the prompt — it becomes your "
+            "full instruction when the job fires. STRATEGY.md is always loaded into context "
+            "automatically; call read_memory() inside the job for any other files you need.\n\n"
+            "Write prompts as if instructing yourself: what to read, what to analyse, what actions "
+            "to take. Be specific — a vague prompt produces vague results.\n\n"
+            "Always propose the schedule to the user in chat and wait for agreement before calling "
+            "this tool. Never create schedules unilaterally."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id":       {"type": "string", "description": "Unique identifier for this schedule entry, e.g. 'premarket-daily'"},
+                "cron":     {"type": "string", "description": "5-field cron: 'minute hour dom month dow', e.g. '45 8 * * 1-5'"},
+                "job_type": {"type": "string", "enum": ["custom"], "description": "Always 'custom'."},
+                "reason":   {"type": "string", "description": "One-line description of why this job exists"},
+                "prompt":   {"type": "string", "description": "Required. The full instruction for what to do when this job fires."},
+            },
+            "required": ["id", "cron", "job_type", "reason", "prompt"],
+        },
+    },
+    {
+        "name": "remove_schedule",
+        "description": "Remove a recurring scheduled job by id. Also removes it from APScheduler immediately.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "list_schedules",
+        "description": "Return all recurring scheduled jobs for the current user.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]

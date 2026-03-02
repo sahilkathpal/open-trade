@@ -22,7 +22,6 @@ import { AppState, StrategyConfig, STRATEGY_CONFIGS } from "@/lib/types"
 import { RiskGauge } from "@/components/RiskGauge"
 import { ProposalCard } from "@/components/ProposalCard"
 import { PositionCard } from "@/components/PositionCard"
-import { WatchlistCard } from "@/components/WatchlistCard"
 import { TriggerCard } from "@/components/TriggerCard"
 import { TokenUsageCard } from "@/components/TokenUsageCard"
 import { MISCountdown } from "@/components/MISCountdown"
@@ -48,11 +47,19 @@ interface ToolCallItem {
   summary: string
 }
 
+interface PermissionRequestItem {
+  id: string
+  tool: string
+  inputs: Record<string, unknown>
+  status: "pending" | "accepted" | "rejected"
+}
+
 interface ChatMessage {
   id: string
   role: "user" | "assistant"
   content: string
   toolCalls?: ToolCallItem[]
+  permissionRequest?: PermissionRequestItem
 }
 
 function getWsBase(): string {
@@ -115,10 +122,87 @@ function AssistantMessage({
   )
 }
 
+function formatPermissionDescription(tool: string, inputs: Record<string, unknown>): string {
+  if (tool === "write_memory" && inputs.filename === "STRATEGY.md") {
+    return "Update STRATEGY.md"
+  }
+  if (tool === "write_schedule") {
+    const cron = inputs.cron ?? ""
+    const reason = inputs.reason ?? ""
+    const prompt = inputs.prompt ?? ""
+    return `Create schedule: ${reason}\nCron: ${cron}${prompt ? `\nPrompt: ${String(prompt).slice(0, 200)}${String(prompt).length > 200 ? "..." : ""}` : ""}`
+  }
+  if (tool === "write_trigger" && inputs.mode === "hard") {
+    const symbol = inputs.symbol ?? ""
+    const type = inputs.type ?? ""
+    const action = inputs.action ?? ""
+    return `Hard trigger: ${type}${symbol ? ` on ${symbol}` : ""}${action ? ` → ${action}` : ""}`
+  }
+  return `${tool}(${JSON.stringify(inputs).slice(0, 100)})`
+}
+
+function PermissionCard({
+  request,
+  onRespond,
+}: {
+  request: PermissionRequestItem
+  onRespond: (id: string, approved: boolean) => void
+}) {
+  const description = formatPermissionDescription(request.tool, request.inputs)
+  const isPending = request.status === "pending"
+
+  return (
+    <div className="flex justify-start">
+      <div className="bg-surface border border-accent-amber/40 rounded-xl px-4 py-3 max-w-lg w-full">
+        <div className="flex items-center gap-1.5 mb-2">
+          <ShieldCheck size={12} className="text-accent-amber" />
+          <span className="text-[11px] font-medium text-accent-amber">Permission Required</span>
+        </div>
+        <p className="text-xs font-mono text-text-muted mb-1">{request.tool}</p>
+        <p className="text-sm text-text-primary whitespace-pre-wrap mb-3 leading-relaxed">{description}</p>
+        {request.tool === "write_memory" && request.inputs.content != null && (
+          <details className="mb-3">
+            <summary className="text-xs text-text-muted cursor-pointer hover:text-text-primary">
+              Show content
+            </summary>
+            <pre className="mt-2 text-xs text-text-muted bg-bg rounded p-2 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">
+              {String(request.inputs.content as string)}
+            </pre>
+          </details>
+        )}
+        {isPending ? (
+          <div className="flex gap-2">
+            <button
+              onClick={() => onRespond(request.id, true)}
+              className="px-3 py-1.5 text-xs font-medium bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors"
+            >
+              Accept
+            </button>
+            <button
+              onClick={() => onRespond(request.id, false)}
+              className="px-3 py-1.5 text-xs font-medium bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors"
+            >
+              Reject
+            </button>
+          </div>
+        ) : (
+          <span
+            className={`text-xs font-medium ${
+              request.status === "accepted" ? "text-accent-green" : "text-accent-red"
+            }`}
+          >
+            {request.status === "accepted" ? "Accepted" : "Rejected"}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Chat ──────────────────────────────────────────────────────────────────────
 
 const CHAT_SUGGESTIONS = [
-  "What's the market brief for today?",
+  "Help me set up my trading strategy",
   "Review this week's trades and learnings",
   "Suggest improvements to my strategy",
 ]
@@ -141,7 +225,6 @@ function ChatArea({
 
   const todayPnl = state?.agent_pnl?.total ?? 0
   const positionCount = state?.positions?.length ?? 0
-  const watchlistCount = state?.watchlist ? Object.keys(state.watchlist).length : 0
 
   // Splash mode
   const [chatInput, setChatInput] = useState("")
@@ -291,6 +374,31 @@ function ChatArea({
           }
           streamingRef.current = updated
           setStreaming(updated)
+        } else if (event.type === "permission_request") {
+          // Flush any accumulated streaming content as a message first
+          const current = streamingRef.current
+          if (current && (current.content || current.toolCalls.length > 0)) {
+            const id = `msg-${Date.now()}`
+            setMessages((msgs) => [
+              ...msgs,
+              { id, role: "assistant", content: current.content, toolCalls: current.toolCalls },
+            ])
+          }
+          streamingRef.current = { content: "", toolCalls: [] }
+          setStreaming(null)
+          // Add permission request as an inline message item
+          const permMsg: ChatMessage = {
+            id: `perm-${event.id}`,
+            role: "assistant",
+            content: "",
+            permissionRequest: {
+              id: event.id,
+              tool: event.tool,
+              inputs: event.inputs,
+              status: "pending",
+            },
+          }
+          setMessages((msgs) => [...msgs, permMsg])
         } else if (event.type === "done") {
           // Read from ref — always has the latest tokens (direct write, no render lag).
           // Never call setMessages inside a setStreaming updater — React Strict Mode
@@ -299,7 +407,7 @@ function ChatArea({
           streamingRef.current = null
           setStreaming(null)
           setIsThinking(false)
-          if (current) {
+          if (current && (current.content || current.toolCalls.length > 0)) {
             const id = `msg-${Date.now()}`
             setMessages((msgs) => [
               ...msgs,
@@ -349,6 +457,31 @@ function ChatArea({
     wsRef.current?.send(JSON.stringify({ content }))
   }, [input, isConnected, isThinking])
 
+  // Respond to a permission request
+  const respondToPermission = useCallback((requestId: string, approved: boolean) => {
+    wsRef.current?.send(JSON.stringify({
+      type: "permission_response",
+      id: requestId,
+      approved,
+    }))
+    // Update the permission card status
+    setMessages((msgs) =>
+      msgs.map((m) =>
+        m.permissionRequest?.id === requestId
+          ? {
+              ...m,
+              permissionRequest: {
+                ...m.permissionRequest,
+                status: approved ? "accepted" as const : "rejected" as const,
+              },
+            }
+          : m
+      )
+    )
+    // Resume streaming state since the agent will continue
+    setStreaming({ content: "", toolCalls: [] })
+  }, [])
+
   // ── SPLASH MODE ────────────────────────────────────────────────────────────
   if (!threadId) {
     return (
@@ -373,7 +506,6 @@ function ChatArea({
               <span>·</span>
               <span>{positionCount} positions</span>
               <span>·</span>
-              <span>{watchlistCount} watching</span>
               {state.market_open && (
                 <>
                   <span>·</span>
@@ -464,7 +596,13 @@ function ChatArea({
 
         <div className="max-w-2xl mx-auto space-y-5">
           {messages.map((msg) =>
-            msg.role === "user" ? (
+            msg.permissionRequest ? (
+              <PermissionCard
+                key={msg.id}
+                request={msg.permissionRequest}
+                onRespond={respondToPermission}
+              />
+            ) : msg.role === "user" ? (
               <UserMessage key={msg.id} content={msg.content} />
             ) : (
               <AssistantMessage key={msg.id} content={msg.content} toolCalls={msg.toolCalls} />
@@ -602,22 +740,6 @@ function TradesContent({
         )}
       </div>
 
-      <div>
-        <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-2">
-          Watchlist ({Object.keys(state.watchlist).length})
-        </h2>
-        {Object.keys(state.watchlist).length === 0 ? (
-          <div className="bg-surface rounded-lg border border-border p-4 text-center text-text-muted text-sm">
-            Nothing on watchlist
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {Object.entries(state.watchlist).map(([symbol, entry]) => (
-              <WatchlistCard key={symbol} symbol={symbol} entry={entry} />
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   )
 }

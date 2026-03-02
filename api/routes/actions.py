@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 
 from api.auth import get_current_uid
-from agent.tools import get_pending_approvals, save_pending_approvals, place_trade, reset_agent_pnl, _save_watchlist, _save_triggers
+from agent.tools import get_pending_approvals, save_pending_approvals, place_trade, reset_agent_pnl, _save_triggers
 from agent.runner import run
 from api import activity_log
 from api.routes.state import _scheduler_status, _set_user_ctx_for_uid
@@ -123,7 +123,6 @@ def trigger_job(
         try:
             # Catchup starts a fresh session — clear stale data from previous day
             save_pending_approvals({})
-            _save_watchlist({})
             _save_triggers([])
             reset_agent_pnl()
             run(job_type)

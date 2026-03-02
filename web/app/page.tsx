@@ -50,12 +50,15 @@ export default function PortfolioPage() {
     return () => clearInterval(interval)
   }, [fetchState, fetchSettings])
 
-  const startIntradayChat = useCallback(async () => {
+  const startIntradayChat = useCallback(async (message?: string) => {
     setChatLoading(true)
     try {
       const res = await authFetch("/api/threads/intraday", { method: "POST" })
       if (!res.ok) return
       const thread = await res.json()
+      if (message?.trim()) {
+        sessionStorage.setItem(`thread-init-${thread.id}`, message.trim())
+      }
       router.push(`/s/intraday?t=${thread.id}`)
     } catch {
       // silent
@@ -66,7 +69,6 @@ export default function PortfolioPage() {
 
   const agentPnl = state?.agent_pnl?.total ?? 0
   const positionCount = state?.positions?.length ?? 0
-  const watchlistCount = state?.watchlist ? Object.keys(state.watchlist).length : 0
   const triggerCount = state?.triggers?.length ?? 0
   const seedCapital = state?.seed_capital ?? 0
   const dailyLossLimit = state?.daily_loss_limit ?? 0
@@ -250,10 +252,6 @@ export default function PortfolioPage() {
                   <span className="text-text-primary">{positionCount}</span>
                 </div>
                 <div>
-                  <span className="text-text-muted">Watching </span>
-                  <span className="text-text-primary">{watchlistCount}</span>
-                </div>
-                <div>
                   <span className="text-text-muted">Triggers </span>
                   <span className="text-text-primary">{triggerCount}</span>
                 </div>
@@ -283,14 +281,16 @@ export default function PortfolioPage() {
         {/* ── Chat bar ─────────────────────────────────────────── */}
         <div className="w-full">
           <form
-            onSubmit={(e) => { e.preventDefault(); startIntradayChat() }}
+            onSubmit={(e) => {
+              e.preventDefault()
+              startIntradayChat(chatInput || undefined)
+            }}
             className="bg-surface rounded-2xl border border-border overflow-hidden"
           >
             <input
               type="text"
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
-              onFocus={startIntradayChat}
               placeholder="Ask about your portfolio or start a new chat..."
               disabled={chatLoading}
               className="w-full bg-transparent px-4 pt-4 pb-3 text-sm placeholder:text-text-muted focus:outline-none disabled:opacity-50 disabled:cursor-wait"

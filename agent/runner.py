@@ -2,8 +2,9 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import anthropic
 from dotenv import load_dotenv
@@ -19,122 +20,59 @@ load_dotenv()
 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 MODEL = "claude-sonnet-4-6"
 
-# ── Prompts for each job type ──────────────────────────────────────────────────
+
+def _needs_permission(tool_name: str, inputs: dict) -> bool:
+    """Return True if this tool call requires user approval before execution."""
+    if tool_name == "write_memory" and inputs.get("filename") == "STRATEGY.md":
+        return True
+    if tool_name == "write_schedule":
+        return True
+    if tool_name == "write_trigger" and inputs.get("mode") == "hard":
+        return True
+    return False
+
+# ── Prompts for system-level job types ────────────────────────────────────────
+# Only trigger and catchup are system-owned. All scheduled jobs (premarket,
+# execution, EOD, or anything else) use Claude-authored prompts stored in
+# SCHEDULE.json — job_type="custom" with a prompt field Claude writes during
+# the strategy setup conversation.
 PROMPTS = {
-    "premarket": """Good morning. It's pre-market screening time (8:45 AM).
-
-Your job right now is SCREENING ONLY — not entry planning. Entry levels will be set at 9:35 AM
-after the first candle closes with real data.
-
-1. Read STRATEGY.md to recall your working hypothesis and recent learnings.
-2. Fetch markets and economy news (categories: markets, economy). Assess macro sentiment and
-   which sectors face headwinds vs tailwinds today.
-3. Screen for 2-3 candidate stocks to watch today:
-   - Fundamental quality filter: check get_fundamentals() for P/E, margins, ROE, revenue growth.
-     Prefer stocks with PE < 25, margins > 15%, positive revenue growth.
-   - Thesis: why is this stock interesting TODAY given today's news and macro?
-   - Check daily chart only: get_historical_data(symbol, interval="D", days=60) for trend direction.
-   - Do NOT set entry prices, stop losses, or targets yet. Those come at 9:35 AM with live data.
-4. Rewrite MARKET.md with:
-   - Today's date and macro/sector context
-   - Each candidate marked WATCH with thesis only (no entry levels)
-   - A "Setup to verify at open" note per candidate (e.g. "confirm first candle closes bullish with volume")
-
-Do NOT call place_trade. Do NOT call get_historical_data with intraday intervals.
-Entry decisions happen at 9:35 AM when the first candle has closed.""",
-
-    "execution": """It is 9:35 AM. The first 15-minute candle (9:15–9:30 AM) has just closed.
-This is the execution planning job — set real entry levels using today's live data.
-
-1. Read MARKET.md to get today's WATCH candidates and their pre-market thesis.
-2. For each WATCH candidate:
-   a. Call get_market_quote() to get current price and today's open.
-   b. Call get_historical_data(symbol, interval="15", days=2) to see the first completed candle.
-   c. Evaluate the first candle:
-      - Did it close bullish (close > open)?
-      - Was volume above average (check avg_volume vs first candle volume)?
-      - Is the current price at a reasonable entry (not gapped >1.5% past a logical level)?
-   d. If the setup is valid and price is at entry now:
-      - Set entry price: current price or a tight limit (not chasing a gap).
-      - Set stop loss: below first candle low, or below VWAP — must be 1.5–2.5% below entry.
-      - Set target: minimum 2R from entry.
-      - Call place_trade() to propose the trade.
-   e. If the setup has potential but entry conditions aren't met yet (RSI overbought, price
-      hasn't pulled back to support, waiting for breakout confirmation):
-      - Call add_to_watchlist() with the exact entry range, stop loss, target, quantity,
-        and any technical conditions (rsi_max, candle_close_above).
-      - The heartbeat will monitor and trigger place_trade() automatically when conditions are met.
-      - Mark candidate as WATCH in MARKET.md with the entry range noted.
-   f. If the setup is invalid (weak candle, low volume, gapped too far, thesis broken):
-      - Note reason and mark candidate INVALIDATED in MARKET.md.
-3. Update MARKET.md to reflect outcomes (PLACED / WATCHING / INVALIDATED) and actual entry parameters.
-
-Be honest. If the first candle doesn't confirm an immediate entry, use add_to_watchlist() rather
-than forcing a trade — there will be other opportunities in the session.
-
-Before finishing, set monitoring triggers with write_trigger() for the rest of the session.
-For every placed or watched position, consider:
-- near_stop: buffer_pct 0.5 — review before the hard stop is hit
-- near_target: buffer_pct 0.5 — review whether to trail or exit at target
-- index_below: if Nifty breaking a support level would invalidate your thesis, set it
-- time: only if there is a specific mid-session setup worth checking at a particular time
-  (e.g. "ORB follow-through likely at 10:30" or "second leg after consolidation at 12:00")
-  — do NOT set time triggers just to have activity. If today looks quiet, set none.
-Always set expires_at to today at 15:00 IST.""",
-
     "trigger": """A monitoring trigger you set earlier has just fired. Current time: {current_time} IST.
 The specific condition and your original note are below (appended after this prompt).
 
 Review the situation with fresh data and make a decision. Steps:
-1. Call get_market_quote() for any symbols in the trigger.
-2. Call get_positions() and get_funds() to confirm current exposure and P&L.
-3. Call get_historical_data() if candle structure or indicators are relevant.
-4. Decide and act — exactly one of:
+1. Read STRATEGY.md to recall your rules and current positions context.
+2. Call get_market_quote() for any symbols in the trigger.
+3. Call get_positions() and get_funds() to confirm current exposure and P&L.
+4. Call get_historical_data() if candle structure or indicators are relevant.
+5. Decide and act — exactly one of:
    - exit_position(): setup has broken down, exit before stop is hit
    - place_trade(): entry trigger, conditions confirmed
-   - add_to_watchlist(): entry close but not quite there yet
+   - write_trigger(type="price_in_range", mode="hard", action="place_trade", ...): entry close but conditions not yet met
    - write_trigger(): set a tighter follow-up trigger after reviewing
    - No action: after looking at the data, no action is warranted — note why
-5. Update MARKET.md with what you found and decided (1-2 lines is enough).
 
 Constraints:
 - Do not open new positions if 2 are already open or day P&L ≤ -₹400.
 - Do not chase — if the move already happened before you reviewed, note it and pass.
 - Be brief. Most trigger reviews resolve in 3-4 tool calls.""",
 
-    "eod": """End of day review. Please:
-
-1. Read MARKET.md (today's canvas) and JOURNAL.md (trade history).
-2. Call get_positions() to confirm all positions are closed (MIS auto-squared off).
-3. Call get_funds() to record today's P&L.
-4. Append today's trades to JOURNAL.md with full thesis, outcome, and lesson.
-5. Update STRATEGY.md: what worked today, what didn't, any new pattern observed.
-6. Update MARKET.md to close out today's candidates (mark FILLED/INVALIDATED/EXPIRED).
-
-Be honest in your evaluation. If you made a mistake, record it clearly so you can learn from it.""",
-
     "catchup": """You are joining the market session late — the current time is {current_time} IST.
-Pre-market screening (8:45 AM) and execution planning (9:35 AM) did not run for this account today.
-Do both in one pass, using the intraday data that is already available.
+Your scheduled jobs did not run for this account today. Do a combined screening and
+execution pass using the intraday data already available.
 
-1. Read STRATEGY.md to recall your working hypothesis and recent learnings.
+1. Read STRATEGY.md to recall your current strategy, rules, and recent learnings.
 2. Fetch markets and economy news (categories: markets, economy). Assess today's macro sentiment.
-3. Screen for 2–3 candidate stocks:
-   - Fundamental quality: get_fundamentals() for P/E, margins, ROE, revenue growth.
-     Prefer PE < 25, margins > 15%, positive revenue growth.
-   - Daily trend: get_historical_data(symbol, interval="D", days=60).
-   - Today's intraday action: get_historical_data(symbol, interval="15", days=1).
-     Multiple candles have already printed — use them to confirm or invalidate the thesis.
+3. Screen for candidates using your strategy's criteria. Multiple candles have already printed —
+   use them to confirm or invalidate any thesis.
 4. For each candidate, get_market_quote() for the current price:
-   - Entry now makes sense (not chasing, min 2R): call place_trade().
-   - Close but conditions not yet met: call add_to_watchlist() with exact entry range, SL, target.
+   - Entry makes sense (not chasing, meets your R:R rules): call place_trade().
+   - Close but conditions not met: write_trigger(type="price_in_range", mode="hard", action="place_trade", ...) with entry range, SL, target.
    - Move already happened or thesis broken: skip it, note why.
-5. Write MARKET.md with today's date, macro context, and each candidate's status
-   (PLACED / WATCHING / SKIPPED) with reasoning. Note the late start.
-6. Set monitoring triggers with write_trigger() for any placed/watched positions.
+5. Set monitoring triggers with write_trigger() for any placed/watched positions.
    Always set expires_at to today at 15:00 IST.
 
-Time is limited — be selective. If nothing looks good this late, zero trades is the right answer.""",
+Time is limited — be selective. Zero trades is the right answer if nothing is good.""",
 }
 
 
@@ -188,41 +126,41 @@ def run(job_type: str, extra_prompt: str = "") -> str:
 
     Returns the final text response from the agent.
     """
-    if job_type not in PROMPTS:
-        raise ValueError(f"Unknown job_type: {job_type}. Must be one of {list(PROMPTS.keys())}")
+    if job_type not in PROMPTS and job_type != "custom":
+        raise ValueError(f"Unknown job_type: {job_type}. Must be 'custom' or one of {list(PROMPTS.keys())}")
+
+    if job_type == "custom" and not extra_prompt:
+        return "Error: custom job requires a prompt. Set one via write_schedule()."
 
     activity_log.emit({"type": "job_start", "summary": f"{job_type} started"})
 
-    # Build system prompt from SOUL.md + relevant memory files
+    # Build system prompt from SOUL.md + STRATEGY.md
     # SOUL.md is shared; per-user files live in get_user_ctx().memory_dir
     soul_path = Path("memory/SOUL.md")
     soul = soul_path.read_text() if soul_path.exists() else "You are an autonomous trading agent."
 
     from agent.user_context import get_user_ctx
     mem = get_user_ctx().memory_dir
-    context_files = {
-        "premarket": [mem / "STRATEGY.md"],
-        "execution": [mem / "MARKET.md"],
-        "trigger":   [mem / "MARKET.md"],
-        "catchup":   [mem / "STRATEGY.md"],
-        "eod":       [mem / "MARKET.md", mem / "JOURNAL.md"],
-    }
 
+    # All job types load STRATEGY.md as baseline context.
+    # Claude calls read_memory() for any additional files it needs.
     memory_parts = []
-    for filepath in context_files.get(job_type, []):
-        p = Path(filepath)
-        if p.exists():
-            memory_parts.append(f"## {p.name}\n\n{p.read_text()}")
+    strategy_path = mem / "STRATEGY.md"
+    if strategy_path.exists():
+        memory_parts.append(f"## STRATEGY.md\n\n{strategy_path.read_text()}")
 
     memory_context = "\n\n---\n\n".join(memory_parts)
     system = f"{soul}\n\n---\n\n{memory_context}" if memory_context else soul
 
-    # Initial user message — inject current IST time for time-aware prompts
+    # Initial user message
     import pytz as _pytz
     _now = __import__("datetime").datetime.now(_pytz.timezone("Asia/Kolkata"))
-    user_content = PROMPTS[job_type].replace("{current_time}", _now.strftime("%I:%M %p"))
-    if extra_prompt:
-        user_content += f"\n\n{extra_prompt}"
+    if job_type == "custom":
+        user_content = extra_prompt
+    else:
+        user_content = PROMPTS[job_type].replace("{current_time}", _now.strftime("%I:%M %p"))
+        if extra_prompt:
+            user_content += f"\n\n{extra_prompt}"
 
     messages = [{"role": "user", "content": user_content}]
 
@@ -291,6 +229,7 @@ def run_chat_stream(
     history: list[dict],
     strategy: str = "intraday",
     status_context: str = "",
+    permission_callback: Callable[[str, str, dict], bool] | None = None,
 ) -> Iterator[dict]:
     """
     Streaming chat agent loop.
@@ -338,7 +277,6 @@ The user is talking to you through the open-trade web app. Here's what exists:
 - /status — pending trade proposals
 - /positions — open positions with P&L
 - /funds — account balance
-- /watchlist — current watchlist
 - /triggers — active monitoring triggers
 - /pause and /resume — pause or resume autonomous trading
 - /run premarket|execution|eod — manually trigger a scheduled job
@@ -348,15 +286,18 @@ The user is talking to you through the open-trade web app. Here's what exists:
 
 **What Claude can do from this chat**
 - Answer questions about positions, P&L, market data, fundamentals
-- Read and update MARKET.md, STRATEGY.md via read_memory/write_memory tools
+- Read and update memory files (STRATEGY.md, JOURNAL.md, LEARNINGS.md, and any strategy-specific files) via read_memory/write_memory tools
 - Place trades, exit positions (subject to RiskGuard limits and autonomous mode)
 - Run screens, fetch news, get quotes on any NSE EQ symbol
+- Create and manage recurring scheduled jobs (write_schedule, remove_schedule, list_schedules)
+- On first use: establish the user's trading strategy, write STRATEGY.md, then set up a schedule
+  with Claude-authored prompts for each job (premarket screening, execution, EOD review, etc.)
 
 **What Claude cannot do from chat**
 - Change Guardrails settings (user must use the Guardrails panel)
 - Connect/disconnect the Telegram bot
 - Update Dhan credentials
-- Trigger scheduled jobs directly (premarket, execution, EOD run on their own schedule)\
+- Force-run a scheduled job immediately — jobs run on their cron, not on demand from chat\
 """
 
     # Build system: identity + interface guide + live state
@@ -396,6 +337,27 @@ The user is talking to you through the open-trade web app. Here's what exists:
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
+                    # Check if this tool needs user permission
+                    if permission_callback and _needs_permission(block.name, block.input):
+                        request_id = str(uuid.uuid4())
+                        yield {
+                            "type": "permission_request",
+                            "id": request_id,
+                            "tool": block.name,
+                            "inputs": block.input,
+                        }
+                        approved = permission_callback(request_id, block.name, block.input)
+                        if not approved:
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": json.dumps({
+                                    "status": "rejected",
+                                    "message": "User did not approve this action.",
+                                }),
+                            })
+                            continue
+
                     result = execute_tool(block.name, block.input)
                     summary = _summarise_tool_result(block.name, block.input, result)
                     yield {"type": "tool_call", "tool": block.name, "summary": summary}
