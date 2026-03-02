@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation"
 
 export default function StrategyPage() {
-  redirect("/s/intraday")
+  redirect("/")
 }

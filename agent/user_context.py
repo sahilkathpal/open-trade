@@ -35,8 +35,9 @@ class UserContext:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
         # ── risk / financial settings ──────────────────────────────────────
-        self.daily_loss_limit = -abs(doc.get("daily_loss_limit", 500))
-        self.profit_lock_pct  = doc.get("profit_lock_pct", 4) / 100
+        self.daily_loss_limit      = -abs(doc.get("daily_loss_limit", 500))
+        self.profit_lock_pct       = doc.get("profit_lock_pct", 4) / 100
+        self.strategy_allocations: dict = doc.get("strategy_allocations", {})
 
         from data.dhan_client import DhanClient
         from risk.guard import RiskGuard

@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation"
 import "./globals.css"
 import { AuthProvider, useAuth } from "@/lib/auth"
 import { Sidebar } from "@/components/Sidebar"
+import { auth } from "@/lib/firebase"
 import { useEffect } from "react"
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" })
@@ -18,11 +19,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const { user, loading } = useAuth()
 
+  const firebaseConfigured = !!auth
+
   useEffect(() => {
-    if (!loading && !user) {
+    if (firebaseConfigured && !loading && !user) {
       router.push("/login")
     }
-  }, [loading, user, router])
+  }, [firebaseConfigured, loading, user, router])
 
   // Don't render sidebar on login page
   const isLoginPage = pathname?.startsWith("/login")
@@ -31,7 +34,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     return <>{children}</>
   }
 
-  if (loading) {
+  if (firebaseConfigured && loading) {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
         <div className="text-text-muted font-mono text-sm">Loading...</div>
@@ -39,7 +42,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     )
   }
 
-  if (!user) {
+  if (firebaseConfigured && !user) {
     return null
   }
 

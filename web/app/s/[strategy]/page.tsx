@@ -494,18 +494,14 @@ function ChatArea({
           <h1 className="text-[28px] font-semibold text-text-primary mb-2 text-center">
             {config.name}
           </h1>
-          <p className="text-text-muted text-sm text-center mb-8">
-            {config.subtitle}
-          </p>
 
           {state && (
-            <div className="flex items-center gap-3 mb-8 text-xs text-text-muted">
+            <div className="flex items-center gap-3 mb-8 text-sm text-text-muted">
               <span className={todayPnl >= 0 ? "text-accent-green" : "text-accent-red"}>
                 {formatINR(todayPnl)} today
               </span>
               <span>·</span>
               <span>{positionCount} positions</span>
-              <span>·</span>
               {state.market_open && (
                 <>
                   <span>·</span>
@@ -997,12 +993,30 @@ const PANEL_TABS: { id: PanelSection; label: string; icon: React.ElementType }[]
   { id: "guardrails", label: "Guardrails", icon: ShieldCheck },
 ]
 
+const GENERIC_CONFIG: Omit<StrategyConfig, "id" | "name"> = {
+  live: true,
+  goal: "",
+  subtitle: "",
+  documents: [
+    { id: "strategy", title: "Strategy", file: "STRATEGY.md", description: "Strategy rules and criteria." },
+    { id: "journal",  title: "Journal",  file: "JOURNAL.md",  description: "Trade log." },
+    { id: "learnings", title: "Learnings", file: "LEARNINGS.md", description: "Distilled observations." },
+  ],
+}
+
 export default function StrategyPage() {
   const params = useParams()
   const searchParams = useSearchParams()
   const strategyId = params.strategy as string
   const threadId = searchParams.get("t")
-  const config = STRATEGY_CONFIGS[strategyId]
+  const [registryName, setRegistryName] = useState<string | null>(null)
+
+  const hardcodedConfig = STRATEGY_CONFIGS[strategyId]
+  const config: StrategyConfig = hardcodedConfig ?? {
+    id: strategyId,
+    name: registryName ?? strategyId,
+    ...GENERIC_CONFIG,
+  }
 
   const { authFetch } = useAuth()
   const [state, setState] = useState<AppState | null>(null)
@@ -1028,6 +1042,19 @@ export default function StrategyPage() {
     document.addEventListener("mousemove", onMove)
     document.addEventListener("mouseup", onUp)
   }, [panelWidth])
+
+  // For strategies not in STRATEGY_CONFIGS, fetch the name from the registry
+  useEffect(() => {
+    if (hardcodedConfig) return
+    authFetch("/api/strategies")
+      .then((r) => r.ok ? r.json() : [])
+      .then((list: {id: string; name: string}[]) => {
+        const entry = list.find((s) => s.id === strategyId)
+        if (entry) setRegistryName(entry.name)
+      })
+      .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyId])
 
   const fetchState = useCallback(async () => {
     try {

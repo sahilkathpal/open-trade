@@ -97,7 +97,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from api.routes import state, memory, actions, activity, settings as settings_route, chat, schedules  # noqa: E402
+from api.routes import state, memory, actions, activity, settings as settings_route, chat, schedules, strategies  # noqa: E402
 
 app.include_router(state.router)
 app.include_router(memory.router)
@@ -106,6 +106,7 @@ app.include_router(activity.router)
 app.include_router(settings_route.router)
 app.include_router(chat.router)
 app.include_router(schedules.router)
+app.include_router(strategies.router)
 
 
 @app.get("/api/health")

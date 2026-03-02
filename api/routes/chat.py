@@ -177,6 +177,63 @@ def _build_status_context(strategy: str) -> str:
         return ""
 
 
+def _build_portfolio_context() -> str:
+    """
+    Build portfolio-level context for the system prompt.
+    Used when strategy == "portfolio". Includes cross-strategy summaries.
+    """
+    import json as _json
+    from agent.user_context import get_user_ctx
+
+    # Reuse the per-strategy context for shared sections
+    base = _build_status_context("portfolio")
+    lines = [base] if base else []
+
+    try:
+        ctx = get_user_ctx()
+
+        # ── Capital allocation ────────────────────────────────────────────
+        total = ctx.risk.seed_capital
+        allocations = ctx.strategy_allocations
+        if allocations:
+            allocated = sum(allocations.values())
+            alloc_parts = [f"{sid}: ₹{amt:,.0f}" for sid, amt in allocations.items()]
+            alloc_parts.append(f"unallocated: ₹{total - allocated:,.0f}")
+            lines.append(f"\n## Capital Allocation (total ₹{total:,.0f})\n" + " · ".join(alloc_parts))
+        else:
+            lines.append(f"\n## Capital Allocation\nTotal: ₹{total:,.0f} · No per-strategy allocations set yet")
+
+        # ── Strategy summary ─────────────────────────────────────────────
+        summary_path = ctx.memory_dir / "STRATEGY_SUMMARY.md"
+        if summary_path.exists():
+            content = summary_path.read_text().strip()
+            if content:
+                lines.append(f"\n## Active Strategy Summary\n{content}")
+            else:
+                lines.append("\n## Active Strategy Summary\nNo strategy configured yet — this is a good place to start.")
+        else:
+            lines.append("\n## Active Strategy Summary\nNo strategy configured yet — this is a good place to start.")
+
+        # ── Active schedules ─────────────────────────────────────────────
+        schedule_path = ctx.memory_dir / "SCHEDULE.json"
+        if schedule_path.exists():
+            try:
+                schedules = _json.loads(schedule_path.read_text())
+                if schedules:
+                    sched_lines = []
+                    for job_id, job in schedules.items():
+                        cron = job.get("cron", "?")
+                        sched_lines.append(f"- {job_id}: {cron}")
+                    lines.append(f"\n## Active Schedules\n" + "\n".join(sched_lines))
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
 @router.websocket("/ws/threads/{strategy}/{thread_id}")
 async def chat_websocket(
     websocket: WebSocket,
@@ -256,7 +313,10 @@ async def chat_websocket(
                 if m["role"] in ("user", "assistant")
             ]
 
-            status_context = _build_status_context(strategy)
+            if strategy == "portfolio":
+                status_context = _build_portfolio_context()
+            else:
+                status_context = _build_status_context(strategy)
 
             # ── Permission coordination ────────────────────────────────────
             # Maps request_id -> (Event, result dict)

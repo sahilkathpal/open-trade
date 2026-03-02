@@ -710,6 +710,38 @@ def append_journal(entry: str) -> dict:
     return {"status": "ok", "appended_bytes": len(entry)}
 
 
+def _strategies_path() -> Path:
+    return _memory_dir() / "STRATEGIES.json"
+
+
+def register_strategy(id: str, name: str, status: str = "active") -> dict:
+    """Register or update a strategy in the user's strategy registry."""
+    path = _strategies_path()
+    strategies: list = json.loads(path.read_text()) if path.exists() else []
+    for s in strategies:
+        if s.get("id") == id:
+            s["name"] = name
+            s["status"] = status
+            break
+    else:
+        strategies.append({"id": id, "name": name, "status": status})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(strategies, indent=2))
+    _append_activity(f"Strategy registered: {id} ({name}) [{status}]")
+    return {"status": "ok", "id": id, "name": name, "registered": strategies}
+
+
+def list_registered_strategies() -> list:
+    """Return all registered strategies for the current user."""
+    path = _strategies_path()
+    if not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return []
+
+
 # ── tool executor ─────────────────────────────────────────────────────────────
 TOOL_FUNCTIONS = {
     "get_market_quote":      get_market_quote,
@@ -727,9 +759,11 @@ TOOL_FUNCTIONS = {
     "write_schedule":        write_schedule,
     "remove_schedule":       remove_schedule,
     "list_schedules":        list_schedules,
-    "read_memory":           read_memory,
-    "write_memory":          write_memory,
-    "append_journal":        append_journal,
+    "read_memory":                read_memory,
+    "write_memory":               write_memory,
+    "append_journal":             append_journal,
+    "register_strategy":          register_strategy,
+    "list_registered_strategies": list_registered_strategies,
 }
 
 
@@ -1035,6 +1069,33 @@ ALL_TOOL_SCHEMAS = [
     {
         "name": "list_schedules",
         "description": "Return all recurring scheduled jobs for the current user.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "register_strategy",
+        "description": (
+            "Register or update a strategy in the user's strategy registry (STRATEGIES.json). "
+            "Call this when setting up a new strategy — after writing STRATEGY.md and before creating the schedule. "
+            "The registry is what makes the strategy appear in the portfolio UI, sidebar, and settings."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id":     {"type": "string", "description": "Short slug, e.g. 'intraday', 'swing', 'macro'"},
+                "name":   {"type": "string", "description": "Human-readable strategy name, e.g. 'Intraday Momentum'"},
+                "status": {
+                    "type": "string",
+                    "enum": ["active", "paused", "archived"],
+                    "description": "Current status. Use 'active' when setting up.",
+                    "default": "active",
+                },
+            },
+            "required": ["id", "name"],
+        },
+    },
+    {
+        "name": "list_registered_strategies",
+        "description": "Return all strategies registered for the current user.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]

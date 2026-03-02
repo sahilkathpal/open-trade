@@ -13,6 +13,7 @@ interface Settings {
   seed_capital?: number
   daily_loss_limit?: number
   max_open_positions?: number
+  strategy_allocations?: Record<string, number>
   autonomous?: boolean
   telegram_connected?: boolean
   telegram_username?: string
@@ -61,6 +62,8 @@ export default function SettingsPage() {
   const [seedCapital, setSeedCapital] = useState(10000)
   const [dailyLossLimit, setDailyLossLimit] = useState(500)
   const [maxPositions, setMaxPositions] = useState(2)
+  const [allocations, setAllocations] = useState<Record<string, number>>({})
+  const [settingsStrategies, setSettingsStrategies] = useState<{id: string; name: string; status: string}[]>([])
   const [riskSaving, setRiskSaving] = useState(false)
   const [riskSaved, setRiskSaved] = useState(false)
   const [riskError, setRiskError] = useState<string | null>(null)
@@ -95,7 +98,13 @@ export default function SettingsPage() {
       setSeedCapital(data.seed_capital ?? 10000)
       setDailyLossLimit(Math.abs(data.daily_loss_limit ?? 500))
       setMaxPositions(data.max_open_positions ?? 2)
+      setAllocations(data.strategy_allocations ?? {})
       setAutonomous(data.autonomous ?? false)
+      // Fetch strategies for dynamic allocation fields
+      try {
+        const sr = await authFetch("/api/strategies")
+        if (sr.ok) setSettingsStrategies(await sr.json())
+      } catch { /* silent */ }
       setTelegramConnected(data.telegram_connected ?? false)
       setTelegramUsername(data.telegram_username ?? "")
     } catch {
@@ -172,10 +181,18 @@ export default function SettingsPage() {
   }
 
   const saveRisk = async () => {
+    const totalAllocated = Object.values(allocations).reduce((s, v) => s + (v || 0), 0)
+    if (totalAllocated > seedCapital) {
+      setRiskError(`Total allocated (₹${totalAllocated.toLocaleString("en-IN")}) exceeds total capital (₹${seedCapital.toLocaleString("en-IN")})`)
+      return
+    }
     setRiskSaving(true)
     setRiskError(null)
     setRiskSaved(false)
     try {
+      const strategy_allocations = Object.fromEntries(
+        Object.entries(allocations).filter(([, v]) => v > 0)
+      )
       const res = await authFetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -183,6 +200,7 @@ export default function SettingsPage() {
           seed_capital: seedCapital,
           daily_loss_limit: -Math.abs(dailyLossLimit),
           max_open_positions: maxPositions,
+          strategy_allocations,
         }),
       })
       if (res.status === 401) { router.push("/login"); return }
@@ -494,6 +512,46 @@ export default function SettingsPage() {
                 max={5}
                 className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent-green transition-colors"
               />
+            </div>
+
+            <div className="border-t border-border pt-4">
+              <p className="text-xs font-mono text-text-muted uppercase tracking-wider mb-3">Strategy Allocations</p>
+              {settingsStrategies.length === 0 ? (
+                <p className="text-xs text-text-muted font-mono">No strategies configured yet. Set one up via the Portfolio chat.</p>
+              ) : (
+                <div className="space-y-3">
+                  {settingsStrategies.map((strategy) => (
+                    <div key={strategy.id}>
+                      <label className="block text-xs font-mono text-text-muted mb-1.5">
+                        {strategy.name} (₹)
+                      </label>
+                      <input
+                        type="number"
+                        value={allocations[strategy.id] ?? 0}
+                        onChange={(e) =>
+                          setAllocations((prev) => ({ ...prev, [strategy.id]: Number(e.target.value) }))
+                        }
+                        min={0}
+                        step={1000}
+                        placeholder="0"
+                        className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm font-mono text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent-green transition-colors"
+                      />
+                    </div>
+                  ))}
+                  {(() => {
+                    const totalAllocated = Object.values(allocations).reduce((s, v) => s + (v || 0), 0)
+                    const unallocated = seedCapital - totalAllocated
+                    return (
+                      <p className="text-xs text-text-muted font-mono">
+                        ₹{totalAllocated.toLocaleString("en-IN")} allocated ·{" "}
+                        <span className={unallocated < 0 ? "text-accent-red" : ""}>
+                          ₹{Math.abs(unallocated).toLocaleString("en-IN")} {unallocated >= 0 ? "unallocated" : "over budget"}
+                        </span>
+                      </p>
+                    )
+                  })()}
+                </div>
+              )}
             </div>
 
             {riskError && (

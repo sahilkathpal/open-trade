@@ -14,7 +14,7 @@ import {
 import { useState, useEffect, useCallback } from "react"
 import clsx from "clsx"
 import { useAuth } from "@/lib/auth"
-import { STRATEGY_CONFIGS, COMING_SOON_STRATEGIES } from "@/lib/types"
+import { COMING_SOON_STRATEGIES } from "@/lib/types"
 
 interface ThreadMeta {
   id: string
@@ -22,6 +22,12 @@ interface ThreadMeta {
   title: string
   created_at: string
   status: "idle" | "thinking"
+}
+
+interface StrategyEntry {
+  id: string
+  name: string
+  status: string
 }
 
 function relativeTime(iso: string): string {
@@ -40,53 +46,119 @@ export function Sidebar() {
   const searchParams = useSearchParams()
   const router = useRouter()
   const { user, signOut, authFetch } = useAuth()
-  const [intradayExpanded, setIntradayExpanded] = useState(true)
-  const [threads, setThreads] = useState<ThreadMeta[]>([])
-  const [newChatLoading, setNewChatLoading] = useState(false)
 
+  const currentThreadId = searchParams.get("t")
   const isPortfolioActive = pathname === "/"
-  const isIntradayActive = pathname?.startsWith("/s/intraday")
+  const isPortfolioThread = isPortfolioActive && !!currentThreadId
   const isSettingsActive = pathname?.startsWith("/settings")
-  const activeThreadId = isIntradayActive ? searchParams.get("t") : null
+  const activeStrategyId = pathname?.startsWith("/s/") ? pathname.split("/")[2] : null
+  const activeThreadId = activeStrategyId ? currentThreadId : null
+  const activePortfolioThreadId = isPortfolioThread ? currentThreadId : null
 
-  const intraday = STRATEGY_CONFIGS["intraday"]
+  // Portfolio threads
+  const [portfolioExpanded, setPortfolioExpanded] = useState(false)
+  const [portfolioThreads, setPortfolioThreads] = useState<ThreadMeta[]>([])
+  const [newPortfolioChatLoading, setNewPortfolioChatLoading] = useState(false)
 
-  const loadThreads = useCallback(async () => {
+  // Dynamic strategies
+  const [strategies, setStrategies] = useState<StrategyEntry[]>([])
+  const [expandedStrategies, setExpandedStrategies] = useState<Record<string, boolean>>({})
+  const [strategyThreads, setStrategyThreads] = useState<Record<string, ThreadMeta[]>>({})
+  const [chatLoading, setChatLoading] = useState<Record<string, boolean>>({})
+
+  // Auto-expand portfolio section when on a portfolio thread
+  useEffect(() => {
+    if (isPortfolioThread) setPortfolioExpanded(true)
+  }, [isPortfolioThread])
+
+  const loadPortfolioThreads = useCallback(async () => {
     try {
-      const res = await authFetch("/api/threads/intraday")
+      const res = await authFetch("/api/threads/portfolio")
       if (!res.ok) return
       const data = await res.json()
-      setThreads(data)
+      setPortfolioThreads(data)
     } catch { /* silent */ }
   }, [authFetch])
 
   useEffect(() => {
-    if (intradayExpanded) {
-      loadThreads()
-    }
-  }, [intradayExpanded, loadThreads])
+    if (portfolioExpanded) loadPortfolioThreads()
+  }, [portfolioExpanded, loadPortfolioThreads])
 
-  // Reload when a new thread is opened
   useEffect(() => {
-    if (isIntradayActive && activeThreadId) {
-      loadThreads()
-    }
-  }, [activeThreadId, isIntradayActive, loadThreads])
+    if (isPortfolioThread && activePortfolioThreadId) loadPortfolioThreads()
+  }, [activePortfolioThreadId, isPortfolioThread, loadPortfolioThreads])
 
-  const handleNewChat = useCallback(async () => {
-    setNewChatLoading(true)
+  const handleNewPortfolioChat = useCallback(async () => {
+    setNewPortfolioChatLoading(true)
     try {
-      const res = await authFetch("/api/threads/intraday", { method: "POST" })
+      const res = await authFetch("/api/threads/portfolio", { method: "POST" })
       if (!res.ok) return
       const thread = await res.json()
-      setIntradayExpanded(true)
-      router.push(`/s/intraday?t=${thread.id}`)
-      setTimeout(loadThreads, 300)
+      setPortfolioExpanded(true)
+      router.push(`/?t=${thread.id}`)
+      setTimeout(loadPortfolioThreads, 300)
     } catch { /* silent */ }
     finally {
-      setNewChatLoading(false)
+      setNewPortfolioChatLoading(false)
     }
-  }, [authFetch, router, loadThreads])
+  }, [authFetch, router, loadPortfolioThreads])
+
+  // Strategy loading
+  const loadThreadsForStrategy = useCallback(async (strategyId: string) => {
+    try {
+      const res = await authFetch(`/api/threads/${strategyId}`)
+      if (!res.ok) return
+      const data = await res.json()
+      setStrategyThreads((prev) => ({ ...prev, [strategyId]: data }))
+    } catch { /* silent */ }
+  }, [authFetch])
+
+  const loadStrategies = useCallback(async () => {
+    try {
+      const res = await authFetch("/api/strategies")
+      if (!res.ok) return
+      const data: StrategyEntry[] = await res.json()
+      setStrategies(data)
+      // Auto-expand the active strategy
+      if (activeStrategyId) {
+        setExpandedStrategies((prev) => ({ ...prev, [activeStrategyId]: true }))
+      }
+    } catch { /* silent */ }
+  }, [authFetch, activeStrategyId])
+
+  useEffect(() => {
+    loadStrategies()
+    window.addEventListener("strategies-updated", loadStrategies)
+    return () => window.removeEventListener("strategies-updated", loadStrategies)
+  }, [loadStrategies])
+
+  // Load threads for expanded strategies
+  useEffect(() => {
+    Object.keys(expandedStrategies).forEach((sid) => {
+      if (expandedStrategies[sid]) loadThreadsForStrategy(sid)
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(expandedStrategies), loadThreadsForStrategy])
+
+  // Reload threads for active strategy when thread changes
+  useEffect(() => {
+    if (activeStrategyId && activeThreadId) loadThreadsForStrategy(activeStrategyId)
+  }, [activeThreadId, activeStrategyId, loadThreadsForStrategy])
+
+  const handleNewChat = useCallback(async (strategyId: string) => {
+    setChatLoading((prev) => ({ ...prev, [strategyId]: true }))
+    try {
+      const res = await authFetch(`/api/threads/${strategyId}`, { method: "POST" })
+      if (!res.ok) return
+      const thread = await res.json()
+      setExpandedStrategies((prev) => ({ ...prev, [strategyId]: true }))
+      router.push(`/s/${strategyId}?t=${thread.id}`)
+      setTimeout(() => loadThreadsForStrategy(strategyId), 300)
+    } catch { /* silent */ }
+    finally {
+      setChatLoading((prev) => ({ ...prev, [strategyId]: false }))
+    }
+  }, [authFetch, router, loadThreadsForStrategy])
 
   return (
     <nav className="w-56 bg-surface border-r border-border h-screen flex flex-col shrink-0">
@@ -100,20 +172,67 @@ export function Sidebar() {
 
       <div className="border-t border-border" />
 
-      {/* Portfolio link */}
+      {/* Portfolio link + threads */}
       <div className="px-2 pt-2 pb-1">
-        <Link
-          href="/"
-          className={clsx(
-            "flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors",
-            isPortfolioActive
-              ? "bg-background text-text-primary"
-              : "text-text-muted hover:text-text-primary hover:bg-background/50"
-          )}
-        >
-          <BarChart2 size={15} />
-          <span>Portfolio</span>
-        </Link>
+        <div className="flex items-center">
+          <button
+            onClick={() => setPortfolioExpanded((v) => !v)}
+            className={clsx(
+              "flex-1 flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors text-left",
+              isPortfolioActive && !isPortfolioThread
+                ? "bg-background text-text-primary"
+                : isPortfolioThread
+                ? "text-text-primary"
+                : "text-text-muted hover:text-text-primary hover:bg-background/50"
+            )}
+          >
+            {portfolioExpanded ? (
+              <ChevronDown size={13} className="shrink-0 text-text-muted" />
+            ) : (
+              <ChevronRight size={13} className="shrink-0 text-text-muted" />
+            )}
+            <BarChart2 size={15} className="shrink-0" />
+            <Link href="/" className="flex-1" onClick={(e) => e.stopPropagation()}>
+              Portfolio
+            </Link>
+          </button>
+        </div>
+
+        {portfolioExpanded && (
+          <div className="ml-5 mt-0.5 flex flex-col gap-0.5">
+            {portfolioThreads.map((thread) => {
+              const isActive = activePortfolioThreadId === thread.id
+              return (
+                <Link
+                  key={thread.id}
+                  href={`/?t=${thread.id}`}
+                  className={clsx(
+                    "flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md text-[12px] truncate transition-colors",
+                    isActive
+                      ? "bg-background text-text-primary"
+                      : "text-text-muted hover:text-text-primary hover:bg-background/50"
+                  )}
+                  title={thread.title}
+                >
+                  <MessageSquare size={11} className="shrink-0 text-text-muted" />
+                  <span className="flex-1 truncate">{thread.title}</span>
+                  <span className="text-[10px] text-text-muted shrink-0">
+                    {relativeTime(thread.created_at)}
+                  </span>
+                </Link>
+              )
+            })}
+
+            <button
+              onClick={handleNewPortfolioChat}
+              disabled={newPortfolioChatLoading}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-background/50 transition-colors disabled:opacity-50 disabled:cursor-wait text-left"
+            >
+              <Plus size={12} className="shrink-0" />
+              <span>{newPortfolioChatLoading ? "Creating..." : "New chat"}</span>
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="border-t border-border mx-3 mt-1" />
@@ -124,65 +243,76 @@ export function Sidebar() {
           Strategies
         </p>
 
-        {/* Intraday Momentum — expandable, live */}
-        <div>
-          <button
-            onClick={() => setIntradayExpanded((v) => !v)}
-            className={clsx(
-              "w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors text-left",
-              isIntradayActive
-                ? "bg-background text-text-primary"
-                : "text-text-muted hover:text-text-primary hover:bg-background/50"
-            )}
-          >
-            {intradayExpanded ? (
-              <ChevronDown size={13} className="shrink-0 text-text-muted" />
-            ) : (
-              <ChevronRight size={13} className="shrink-0 text-text-muted" />
-            )}
-            <span className="flex-1 truncate text-[13px]">
-              {intraday.name}
-            </span>
-          </button>
+        {/* Dynamic registered strategies */}
+        {strategies.map((strategy) => {
+          const isActive = pathname?.startsWith(`/s/${strategy.id}`)
+          const isExpanded = expandedStrategies[strategy.id] ?? false
+          const threads = strategyThreads[strategy.id] ?? []
+          const isLoading = chatLoading[strategy.id] ?? false
 
-          {intradayExpanded && (
-            <div className="ml-5 mt-0.5 flex flex-col gap-0.5">
-              {/* Real thread list */}
-              {threads.map((thread) => {
-                const isActive = activeThreadId === thread.id
-                return (
-                  <Link
-                    key={thread.id}
-                    href={`/s/intraday?t=${thread.id}`}
-                    className={clsx(
-                      "flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md text-[12px] truncate transition-colors",
-                      isActive
-                        ? "bg-background text-text-primary"
-                        : "text-text-muted hover:text-text-primary hover:bg-background/50"
-                    )}
-                    title={thread.title}
-                  >
-                    <MessageSquare size={11} className="shrink-0 text-text-muted" />
-                    <span className="flex-1 truncate">{thread.title}</span>
-                    <span className="text-[10px] text-text-muted shrink-0">
-                      {relativeTime(thread.created_at)}
-                    </span>
-                  </Link>
-                )
-              })}
-
-              {/* New chat */}
+          return (
+            <div key={strategy.id}>
               <button
-                onClick={handleNewChat}
-                disabled={newChatLoading}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-background/50 transition-colors disabled:opacity-50 disabled:cursor-wait text-left"
+                onClick={() =>
+                  setExpandedStrategies((prev) => ({
+                    ...prev,
+                    [strategy.id]: !prev[strategy.id],
+                  }))
+                }
+                className={clsx(
+                  "w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors text-left",
+                  isActive
+                    ? "bg-background text-text-primary"
+                    : "text-text-muted hover:text-text-primary hover:bg-background/50"
+                )}
               >
-                <Plus size={12} className="shrink-0" />
-                <span>{newChatLoading ? "Creating..." : "New chat"}</span>
+                {isExpanded ? (
+                  <ChevronDown size={13} className="shrink-0 text-text-muted" />
+                ) : (
+                  <ChevronRight size={13} className="shrink-0 text-text-muted" />
+                )}
+                <span className="flex-1 truncate text-[13px]">{strategy.name}</span>
               </button>
+
+              {isExpanded && (
+                <div className="ml-5 mt-0.5 flex flex-col gap-0.5">
+                  {threads.map((thread) => {
+                    const isThreadActive =
+                      activeStrategyId === strategy.id && activeThreadId === thread.id
+                    return (
+                      <Link
+                        key={thread.id}
+                        href={`/s/${strategy.id}?t=${thread.id}`}
+                        className={clsx(
+                          "flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-md text-[12px] truncate transition-colors",
+                          isThreadActive
+                            ? "bg-background text-text-primary"
+                            : "text-text-muted hover:text-text-primary hover:bg-background/50"
+                        )}
+                        title={thread.title}
+                      >
+                        <MessageSquare size={11} className="shrink-0 text-text-muted" />
+                        <span className="flex-1 truncate">{thread.title}</span>
+                        <span className="text-[10px] text-text-muted shrink-0">
+                          {relativeTime(thread.created_at)}
+                        </span>
+                      </Link>
+                    )
+                  })}
+
+                  <button
+                    onClick={() => handleNewChat(strategy.id)}
+                    disabled={isLoading}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-background/50 transition-colors disabled:opacity-50 disabled:cursor-wait text-left"
+                  >
+                    <Plus size={12} className="shrink-0" />
+                    <span>{isLoading ? "Creating..." : "New chat"}</span>
+                  </button>
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          )
+        })}
 
         {/* Coming soon strategies — muted text only */}
         {COMING_SOON_STRATEGIES.map((s) => (

@@ -66,11 +66,13 @@ export function StrategySettingsPanel({
         if (!data) return
         if (data.max_open_positions != null) setMaxOpenPositions(data.max_open_positions)
         if (strategy) {
-          const k = strategy
-          if (data[`${k}_max_positions`] != null) setStrategyMaxPositions(data[`${k}_max_positions`])
-          if (data[`${k}_max_trade_size`] != null) setMaxTradeSize(data[`${k}_max_trade_size`])
-          if (data[`${k}_stop_loss_pct`] != null) setStopLossPct(data[`${k}_stop_loss_pct`])
-          if (data[`${k}_target_pct`] != null) setTargetPct(data[`${k}_target_pct`])
+          const sr = data.strategy_risk?.[strategy]
+          if (sr) {
+            if (sr.max_positions != null) setStrategyMaxPositions(sr.max_positions)
+            if (sr.max_trade_size != null) setMaxTradeSize(sr.max_trade_size)
+            if (sr.stop_loss_pct != null) setStopLossPct(sr.stop_loss_pct)
+            if (sr.target_pct != null) setTargetPct(sr.target_pct)
+          }
         }
       })
       .catch(() => {})
@@ -81,16 +83,23 @@ export function StrategySettingsPanel({
     setSavingStrategy(true)
     setStrategySaved(false)
     try {
-      await authFetch("/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          [`${strategy}_max_positions`]: strategyMaxPositions,
-          [`${strategy}_max_trade_size`]: maxTradeSize,
-          [`${strategy}_stop_loss_pct`]: stopLossPct,
-          [`${strategy}_target_pct`]: targetPct === "" ? null : targetPct,
+      await Promise.all([
+        authFetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            strategy_risk: {
+              [strategy]: {
+                max_positions: strategyMaxPositions,
+                max_trade_size: maxTradeSize,
+                stop_loss_pct: stopLossPct,
+                target_pct: targetPct === "" ? null : targetPct,
+              },
+            },
+          }),
         }),
-      })
+        new Promise((r) => setTimeout(r, 400)),
+      ])
       setStrategySaved(true)
       onStateRefresh()
       setTimeout(() => setStrategySaved(false), 2000)
@@ -105,15 +114,18 @@ export function StrategySettingsPanel({
     setSavingRisk(true)
     setRiskSaved(false)
     try {
-      await authFetch("/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          seed_capital: seedCapital,
-          daily_loss_limit: dailyLossLimit,
-          max_open_positions: maxOpenPositions,
+      await Promise.all([
+        authFetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            seed_capital: seedCapital,
+            daily_loss_limit: dailyLossLimit,
+            max_open_positions: maxOpenPositions,
+          }),
         }),
-      })
+        new Promise((r) => setTimeout(r, 400)),
+      ])
       setRiskSaved(true)
       onStateRefresh()
       setTimeout(() => setRiskSaved(false), 2000)
