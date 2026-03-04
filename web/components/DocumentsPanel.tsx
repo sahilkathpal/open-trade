@@ -3,9 +3,10 @@
 import { useEffect, useState, useCallback } from "react"
 import { FileText, RefreshCw, ChevronLeft } from "lucide-react"
 import { useAuth } from "@/lib/auth"
-import { STRATEGY_CONFIGS, StrategyDocument } from "@/lib/types"
 import { MarkdownRenderer } from "@/components/MarkdownRenderer"
 import { SlidePanel } from "@/components/SlidePanel"
+
+interface MemoryFile { filename: string; last_modified: string }
 
 interface DocumentsPanelProps {
   open: boolean
@@ -13,46 +14,44 @@ interface DocumentsPanelProps {
   strategy: string
 }
 
-export function DocumentsPanel({ open, onClose, strategy }: DocumentsPanelProps) {
+export function DocumentsPanel({ open, onClose, strategy: _strategy }: DocumentsPanelProps) {
   const { authFetch } = useAuth()
-  const config = STRATEGY_CONFIGS[strategy]
-  const documents: StrategyDocument[] = config?.documents ?? []
 
-  const [selectedDoc, setSelectedDoc] = useState<StrategyDocument | null>(null)
+  const [documents, setDocuments] = useState<MemoryFile[]>([])
+  const [selectedDoc, setSelectedDoc] = useState<MemoryFile | null>(null)
   const [content, setContent] = useState<string>("")
   const [lastModified, setLastModified] = useState<string>("")
   const [loading, setLoading] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
-  // Reset when panel closes
+  // Fetch file list on open; reset on close
   useEffect(() => {
     if (!open) {
       setSelectedDoc(null)
       setContent("")
       setLastModified("")
+      return
     }
-  }, [open])
+    authFetch("/api/memory")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: MemoryFile[]) => setDocuments(data))
+      .catch(() => setDocuments([]))
+  }, [open, authFetch])
 
   const fetchDocument = useCallback(
-    async (doc: StrategyDocument) => {
+    async (doc: MemoryFile) => {
       setLoading(true)
       setErrorMsg(null)
       setContent("")
       try {
-        const res = await authFetch(`/api/memory/${doc.file}`)
+        const res = await authFetch(`/api/memory/${doc.filename}`)
         if (!res.ok) {
           setErrorMsg("No content yet. Claude will write this document as it starts trading.")
           return
         }
-        const text = await res.text()
-        // API may return JSON { content, last_modified } or raw text
-        try {
-          const json = JSON.parse(text)
-          setContent(json.content ?? "")
-          setLastModified(json.last_modified ?? "")
-        } catch {
-          setContent(text)
-        }
+        const json = await res.json()
+        setContent(json.content ?? "")
+        setLastModified(json.last_modified ?? "")
       } catch {
         setErrorMsg("No content yet. Claude will write this document as it starts trading.")
       } finally {
@@ -63,14 +62,13 @@ export function DocumentsPanel({ open, onClose, strategy }: DocumentsPanelProps)
   )
 
   const handleSelectDoc = useCallback(
-    (doc: StrategyDocument) => {
+    (doc: MemoryFile) => {
       setSelectedDoc(doc)
       fetchDocument(doc)
     },
     [fetchDocument]
   )
 
-  // When in document view, Escape backs to list; SlidePanel handles Escape → onClose
   const handleClose = useCallback(() => {
     if (selectedDoc) {
       setSelectedDoc(null)
@@ -90,7 +88,9 @@ export function DocumentsPanel({ open, onClose, strategy }: DocumentsPanelProps)
       })
     : null
 
-  const panelTitle = selectedDoc ? selectedDoc.title : "Strategy Documents"
+  const panelTitle = selectedDoc
+    ? selectedDoc.filename.replace(".md", "")
+    : "Documents"
 
   return (
     <SlidePanel
@@ -104,25 +104,22 @@ export function DocumentsPanel({ open, onClose, strategy }: DocumentsPanelProps)
         <div className="p-4 space-y-3">
           {documents.length === 0 ? (
             <p className="text-text-muted text-sm text-center py-12">
-              No documents yet. Claude will create strategy-specific documents as it starts working.
+              No documents yet. Claude will create files as it starts working.
             </p>
           ) : (
             documents.map((doc) => (
               <div
-                key={doc.id}
-                className="bg-background rounded-lg border border-border p-4 flex items-start justify-between gap-4"
+                key={doc.filename}
+                className="bg-background rounded-lg border border-border p-4 flex items-center justify-between gap-4"
               >
-                <div className="flex items-start gap-3 min-w-0">
-                  <FileText size={15} className="text-text-muted shrink-0 mt-0.5" />
+                <div className="flex items-center gap-3 min-w-0">
+                  <FileText size={15} className="text-text-muted shrink-0" />
                   <div className="min-w-0">
-                    <div className="text-sm font-medium text-text-primary mb-0.5">
-                      {doc.title}
+                    <div className="text-sm font-medium text-text-primary">
+                      {doc.filename.replace(".md", "")}
                     </div>
-                    <div className="text-xs text-text-muted leading-relaxed">
-                      {doc.description}
-                    </div>
-                    <div className="text-[11px] font-mono text-text-muted mt-1.5 opacity-60">
-                      {doc.file}
+                    <div className="text-[11px] font-mono text-text-muted mt-0.5 opacity-60">
+                      {doc.filename}
                     </div>
                   </div>
                 </div>
@@ -150,9 +147,9 @@ export function DocumentsPanel({ open, onClose, strategy }: DocumentsPanelProps)
             </button>
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-medium text-text-primary">{selectedDoc.title}</h3>
+                <h3 className="text-sm font-medium text-text-primary">{selectedDoc.filename.replace(".md", "")}</h3>
                 <p className="text-[11px] font-mono text-text-muted mt-0.5">
-                  {selectedDoc.file}
+                  {selectedDoc.filename}
                   {modifiedStr && <span className="ml-2">· Last updated: {modifiedStr}</span>}
                 </p>
               </div>

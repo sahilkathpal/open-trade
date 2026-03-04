@@ -1212,8 +1212,7 @@ export default function StrategyPage() {
           const isActive = panelOpen && panelSection === id
           const isGuardrails = id === "guardrails"
           const guardColor = isGuardrails
-            ? riskLevel === "alert"   ? "text-accent-red"
-            : riskLevel === "caution" ? "text-accent-amber"
+            ? riskLevel === "caution" ? "text-accent-amber"
             : "text-accent-green"
             : ""
           return (

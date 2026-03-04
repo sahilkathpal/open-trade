@@ -3,9 +3,7 @@
 import { useState } from "react"
 import { SlidePanel } from "@/components/SlidePanel"
 import { CapitalPanel } from "@/components/CapitalPanel"
-import { RiskGauge } from "@/components/RiskGauge"
 import { PositionCard } from "@/components/PositionCard"
-import { WatchlistCard } from "@/components/WatchlistCard"
 import { TriggerCard } from "@/components/TriggerCard"
 import { ProposalCard } from "@/components/ProposalCard"
 import { MISCountdown } from "@/components/MISCountdown"
@@ -66,7 +64,6 @@ export function DashboardPanel({
   )
 
   const approvalEntries = Object.entries(state?.pending_approvals ?? {})
-  const watchlistEntries = Object.entries(state?.watchlist ?? {})
 
   async function handlePauseResume() {
     if (!state) return
@@ -117,12 +114,6 @@ export function DashboardPanel({
                 agentPnl={agentPnl}
                 seedCapital={state.seed_capital ?? 0}
                 deployedNotional={deployedNotional}
-              />
-
-              <RiskGauge
-                seedCapital={state.seed_capital ?? 0}
-                cumulativeRealized={state.cumulative_realized ?? 0}
-                maxDrawdownPct={state.max_drawdown_pct ?? 10}
               />
 
               {/* Upcoming schedule */}
@@ -195,17 +186,9 @@ export function DashboardPanel({
 
           {/* Watchlist */}
           {activeTab === "watchlist" && (
-            <>
-              {watchlistEntries.length === 0 ? (
-                <p className="text-text-muted text-sm text-center py-12">
-                  Nothing on watchlist
-                </p>
-              ) : (
-                watchlistEntries.map(([symbol, entry]) => (
-                  <WatchlistCard key={symbol} symbol={symbol} entry={entry} />
-                ))
-              )}
-            </>
+            <p className="text-text-muted text-sm text-center py-12">
+              Nothing on watchlist
+            </p>
           )}
 
           {/* Triggers */}
@@ -243,7 +226,7 @@ export function DashboardPanel({
                     target_price={proposal.target_price}
                     quantity={proposal.quantity}
                     thesis={proposal.thesis}
-                    maxLossPerTrade={state?.max_loss_per_trade}
+                    tradeRiskLimit={undefined}
                     onApproved={onStateRefresh}
                     onDenied={onStateRefresh}
                   />
