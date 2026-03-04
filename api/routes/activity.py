@@ -13,7 +13,9 @@ async def activity_stream():
 
     async def event_generator():
         try:
-            # First: send all buffered events
+            # Flush immediately so the browser fires EventSource.onopen
+            yield ": connected\n\n"
+            # Then: send all buffered events
             for event in get_recent():
                 yield f"data: {json.dumps(event)}\n\n"
             # Then: stream new events as they arrive

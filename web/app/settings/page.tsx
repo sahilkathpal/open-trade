@@ -10,10 +10,6 @@ interface Settings {
   dhan_client_id?: string
   dhan_access_token_set?: boolean
   dhan_token_updated_at?: string
-  seed_capital?: number
-  daily_loss_limit?: number
-  max_open_positions?: number
-  strategy_allocations?: Record<string, number>
   autonomous?: boolean
   telegram_connected?: boolean
   telegram_username?: string
@@ -58,16 +54,6 @@ export default function SettingsPage() {
   const [brokerError, setBrokerError] = useState<string | null>(null)
   const [brokerDisconnecting, setBrokerDisconnecting] = useState(false)
 
-  // Risk section
-  const [seedCapital, setSeedCapital] = useState(10000)
-  const [dailyLossLimit, setDailyLossLimit] = useState(500)
-  const [maxPositions, setMaxPositions] = useState(2)
-  const [allocations, setAllocations] = useState<Record<string, number>>({})
-  const [settingsStrategies, setSettingsStrategies] = useState<{id: string; name: string; status: string}[]>([])
-  const [riskSaving, setRiskSaving] = useState(false)
-  const [riskSaved, setRiskSaved] = useState(false)
-  const [riskError, setRiskError] = useState<string | null>(null)
-
   // Autonomous section
   const [autonomous, setAutonomous] = useState(false)
   const [showConfirmModal, setShowConfirmModal] = useState(false)
@@ -95,16 +81,7 @@ export default function SettingsPage() {
       const data: Settings = await res.json()
       setSettings(data)
       setDhanClientId(data.dhan_client_id ?? "")
-      setSeedCapital(data.seed_capital ?? 10000)
-      setDailyLossLimit(Math.abs(data.daily_loss_limit ?? 500))
-      setMaxPositions(data.max_open_positions ?? 2)
-      setAllocations(data.strategy_allocations ?? {})
       setAutonomous(data.autonomous ?? false)
-      // Fetch strategies for dynamic allocation fields
-      try {
-        const sr = await authFetch("/api/strategies")
-        if (sr.ok) setSettingsStrategies(await sr.json())
-      } catch { /* silent */ }
       setTelegramConnected(data.telegram_connected ?? false)
       setTelegramUsername(data.telegram_username ?? "")
     } catch {
@@ -177,40 +154,6 @@ export default function SettingsPage() {
       setBrokerError("Failed to save broker settings")
     } finally {
       setBrokerSaving(false)
-    }
-  }
-
-  const saveRisk = async () => {
-    const totalAllocated = Object.values(allocations).reduce((s, v) => s + (v || 0), 0)
-    if (totalAllocated > seedCapital) {
-      setRiskError(`Total allocated (₹${totalAllocated.toLocaleString("en-IN")}) exceeds total capital (₹${seedCapital.toLocaleString("en-IN")})`)
-      return
-    }
-    setRiskSaving(true)
-    setRiskError(null)
-    setRiskSaved(false)
-    try {
-      const strategy_allocations = Object.fromEntries(
-        Object.entries(allocations).filter(([, v]) => v > 0)
-      )
-      const res = await authFetch("/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          seed_capital: seedCapital,
-          daily_loss_limit: -Math.abs(dailyLossLimit),
-          max_open_positions: maxPositions,
-          strategy_allocations,
-        }),
-      })
-      if (res.status === 401) { router.push("/login"); return }
-      if (!res.ok) throw new Error("Save failed")
-      setRiskSaved(true)
-      setTimeout(() => setRiskSaved(false), 3000)
-    } catch {
-      setRiskError("Failed to save risk settings")
-    } finally {
-      setRiskSaving(false)
     }
   }
 
@@ -460,111 +403,7 @@ export default function SettingsPage() {
           </div>
         </SectionCard>
 
-        {/* Section 2: Risk Settings */}
-        <SectionCard title="Risk Settings">
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-mono text-text-muted mb-1.5 uppercase tracking-wider">
-                Agent Capital (₹)
-              </label>
-              <input
-                type="number"
-                value={seedCapital}
-                onChange={(e) => setSeedCapital(Number(e.target.value))}
-                min={1000}
-                step={1000}
-                className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent-green transition-colors"
-              />
-              <p className="text-xs text-text-muted font-mono mt-1.5 leading-relaxed">
-                The amount of capital the agent is allowed to trade with. Position sizing, risk limits, and P&amp;L percentages are all calculated against this number.
-              </p>
-              <p className="text-xs text-text-muted font-mono mt-1 leading-relaxed">
-                If your Dhan account balance is lower than this, the available balance takes precedence — the agent will never spend more than you actually have.
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-mono text-text-muted mb-1.5 uppercase tracking-wider">
-                Daily Loss Limit (₹)
-              </label>
-              <input
-                type="number"
-                value={dailyLossLimit}
-                onChange={(e) => setDailyLossLimit(Math.abs(Number(e.target.value)))}
-                min={100}
-                step={100}
-                className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent-green transition-colors"
-              />
-              <p className="text-xs text-text-muted font-mono mt-1">
-                Agent stops trading if day P&amp;L drops below -₹{dailyLossLimit.toLocaleString("en-IN")}
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-mono text-text-muted mb-1.5 uppercase tracking-wider">
-                Max Open Positions
-              </label>
-              <input
-                type="number"
-                value={maxPositions}
-                onChange={(e) => setMaxPositions(Math.min(5, Math.max(1, Number(e.target.value))))}
-                min={1}
-                max={5}
-                className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm font-mono text-text-primary focus:outline-none focus:border-accent-green transition-colors"
-              />
-            </div>
-
-            <div className="border-t border-border pt-4">
-              <p className="text-xs font-mono text-text-muted uppercase tracking-wider mb-3">Strategy Allocations</p>
-              {settingsStrategies.length === 0 ? (
-                <p className="text-xs text-text-muted font-mono">No strategies configured yet. Set one up via the Portfolio chat.</p>
-              ) : (
-                <div className="space-y-3">
-                  {settingsStrategies.map((strategy) => (
-                    <div key={strategy.id}>
-                      <label className="block text-xs font-mono text-text-muted mb-1.5">
-                        {strategy.name} (₹)
-                      </label>
-                      <input
-                        type="number"
-                        value={allocations[strategy.id] ?? 0}
-                        onChange={(e) =>
-                          setAllocations((prev) => ({ ...prev, [strategy.id]: Number(e.target.value) }))
-                        }
-                        min={0}
-                        step={1000}
-                        placeholder="0"
-                        className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm font-mono text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent-green transition-colors"
-                      />
-                    </div>
-                  ))}
-                  {(() => {
-                    const totalAllocated = Object.values(allocations).reduce((s, v) => s + (v || 0), 0)
-                    const unallocated = seedCapital - totalAllocated
-                    return (
-                      <p className="text-xs text-text-muted font-mono">
-                        ₹{totalAllocated.toLocaleString("en-IN")} allocated ·{" "}
-                        <span className={unallocated < 0 ? "text-accent-red" : ""}>
-                          ₹{Math.abs(unallocated).toLocaleString("en-IN")} {unallocated >= 0 ? "unallocated" : "over budget"}
-                        </span>
-                      </p>
-                    )
-                  })()}
-                </div>
-              )}
-            </div>
-
-            {riskError && (
-              <div className="text-accent-red text-xs font-mono bg-accent-red/10 border border-accent-red/20 rounded px-3 py-2">
-                {riskError}
-              </div>
-            )}
-
-            <SaveButton onClick={saveRisk} loading={riskSaving} saved={riskSaved} />
-          </div>
-        </SectionCard>
-
-        {/* Section 3: Autonomous Trading */}
+        {/* Section 2: Autonomous Trading */}
         <SectionCard title="Autonomous Trading">
           <div className="space-y-4">
             <div className="flex items-center justify-between">

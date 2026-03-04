@@ -1,10 +1,12 @@
 "use client"
 
-import clsx from "clsx"
-
 interface RiskGaugeProps {
-  dayPnl: number
-  limit: number
+  seedCapital: number
+  cumulativeRealized: number
+  drawdownBaseline: number
+  maxDrawdownPct: number
+  tripped: boolean
+  onReset: () => void
 }
 
 function formatINR(n: number): string {
@@ -16,55 +18,61 @@ function formatINR(n: number): string {
   }).format(n)
 }
 
-export function RiskGauge({ dayPnl, limit }: RiskGaugeProps) {
-  const loss = dayPnl < 0 ? Math.abs(dayPnl) : 0
-  const consumed = Math.min((loss / limit) * 100, 100)
-  const remaining = Math.max(limit - loss, 0)
+export function RiskGauge({
+  seedCapital,
+  cumulativeRealized,
+  drawdownBaseline,
+  maxDrawdownPct,
+  tripped,
+  onReset,
+}: RiskGaugeProps) {
+  const lossSinceReset = cumulativeRealized - drawdownBaseline
+  const lossBudget = seedCapital * maxDrawdownPct / 100
+  const usedPct = lossBudget > 0 ? Math.min(100, (Math.abs(Math.min(0, lossSinceReset)) / lossBudget) * 100) : 0
 
-  const isProfit = dayPnl >= 0
-  const isCritical = consumed > 80
-  const isWarning = consumed > 50
+  const color = tripped ? "text-accent-red" : usedPct > 80 ? "text-accent-amber" : "text-text-muted"
+  const barColor = tripped ? "bg-accent-red" : usedPct > 80 ? "bg-accent-amber" : "bg-accent-green"
 
   return (
-    <div className="bg-surface rounded-lg border border-border p-4">
-      <div className="text-text-muted text-xs uppercase tracking-wider mb-3">Daily Loss Limit</div>
+    <div className={`bg-surface rounded-lg border p-4 ${tripped ? "border-accent-red/40" : "border-border"}`}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-text-muted text-xs uppercase tracking-wider">Loss Budget</div>
+        {tripped && (
+          <button
+            onClick={onReset}
+            className="text-[11px] font-medium text-accent-red underline underline-offset-2 hover:opacity-80 transition-opacity"
+          >
+            Reset circuit breaker
+          </button>
+        )}
+      </div>
 
-      {isProfit ? (
-        <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-accent-green" />
-          <span className="text-sm font-mono text-accent-green">No losses</span>
-          {dayPnl > 0 && <span className="text-xs text-text-muted font-mono ml-auto">+{formatINR(dayPnl)}</span>}
-        </div>
+      {tripped ? (
+        <p className="text-sm font-semibold text-accent-red font-mono mb-3">
+          Circuit breaker tripped
+        </p>
       ) : (
-        <>
-          <div className="flex items-center justify-between mb-2">
-            <span className={clsx(
-              "font-mono text-sm",
-              isCritical ? "text-accent-red" : isWarning ? "text-accent-amber" : "text-text-primary"
-            )}>
-              {formatINR(remaining)} remaining
-            </span>
-            <span className="text-xs font-mono text-text-muted">
-              {formatINR(-loss)} / -{formatINR(limit)}
-            </span>
-          </div>
+        <div className="flex items-baseline justify-between mb-3">
+          <span className={`font-mono text-base ${color}`}>
+            {lossSinceReset < 0 ? formatINR(lossSinceReset) : "—"} since last reset
+          </span>
+          <span className="text-xs text-text-muted font-mono">
+            limit {formatINR(-lossBudget)}
+          </span>
+        </div>
+      )}
 
-          <div className="h-1.5 rounded-full bg-border overflow-hidden">
-            <div
-              className={clsx(
-                "h-full rounded-full transition-all",
-                isCritical ? "bg-accent-red" : isWarning ? "bg-accent-amber" : "bg-accent-green"
-              )}
-              style={{ width: `${consumed}%` }}
-            />
-          </div>
+      <div className="h-1.5 rounded-full bg-border overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all ${barColor}`}
+          style={{ width: `${usedPct}%` }}
+        />
+      </div>
 
-          {isCritical && (
-            <p className="text-xs text-accent-red font-mono mt-2">
-              Agent will halt at -{formatINR(limit)}
-            </p>
-          )}
-        </>
+      {tripped && (
+        <p className="text-xs text-accent-red font-mono mt-2">
+          {formatINR(Math.abs(lossSinceReset))} in realized losses — no new entries until you reset.
+        </p>
       )}
     </div>
   )

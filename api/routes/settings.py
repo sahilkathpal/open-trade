@@ -34,19 +34,13 @@ def _save_local_settings(updates: dict):
 
 
 class StrategyRisk(BaseModel):
-    max_positions:  Optional[int]   = None
-    max_trade_size: Optional[float] = None
-    stop_loss_pct:  Optional[float] = None
-    target_pct:     Optional[float] = None
+    max_risk_per_trade_pct: Optional[float] = None  # % of strategy allocation
 
 
 class SettingsIn(BaseModel):
     dhan_client_id:        Optional[str]             = None
     dhan_access_token:     Optional[str]             = None
     seed_capital:          Optional[float]           = None
-    daily_loss_limit:      Optional[float]           = None
-    max_open_positions:    Optional[int]             = None  # stored as max_positions in Firestore
-    profit_lock_pct:       Optional[float]           = None
     autonomous:            Optional[bool]            = None
     strategy_allocations:  Optional[dict]            = None  # {"intraday": 60000}
     strategy_risk:         Optional[dict[str, StrategyRisk]] = None  # {"intraday": {...}}
@@ -67,9 +61,6 @@ def get_settings(uid: Annotated[str, Depends(get_current_uid)]):
             "dhan_client_id":        local.get("dhan_client_id",    os.getenv("DHAN_CLIENT_ID", "")),
             "dhan_access_token_set": bool(local.get("dhan_access_token", os.getenv("DHAN_ACCESS_TOKEN"))),
             "seed_capital":          local.get("seed_capital",       float(os.getenv("SEED_CAPITAL", "10000"))),
-            "daily_loss_limit":      abs(local.get("daily_loss_limit", 500.0)),
-            "max_open_positions":    local.get("max_positions",      2),
-            "profit_lock_pct":       local.get("profit_lock_pct",    4.0),
             "autonomous":            local.get("autonomous",         os.getenv("AUTONOMOUS", "false").lower() == "true"),
             "strategy_allocations":  local.get("strategy_allocations", {}),
             "strategy_risk":         local.get("strategy_risk", {}),
@@ -83,9 +74,6 @@ def get_settings(uid: Annotated[str, Depends(get_current_uid)]):
         "dhan_client_id":        doc.get("dhan_client_id", ""),
         "dhan_access_token_set": bool(doc.get("dhan_access_token")),
         "seed_capital":          doc.get("seed_capital", 10000.0),
-        "daily_loss_limit":      abs(doc.get("daily_loss_limit", 500.0)),
-        "max_open_positions":    doc.get("max_positions", 2),
-        "profit_lock_pct":       doc.get("profit_lock_pct", 4.0),
         "autonomous":            doc.get("autonomous", False),
         "strategy_allocations":  doc.get("strategy_allocations", {}),
         "strategy_risk":         doc.get("strategy_risk", {}),
@@ -112,16 +100,13 @@ def update_settings(
             local["dhan_access_token"] = raw["dhan_access_token"]
         if raw.get("seed_capital") is not None:
             local["seed_capital"] = raw["seed_capital"]
-        if raw.get("daily_loss_limit") is not None:
-            local["daily_loss_limit"] = abs(raw["daily_loss_limit"])
-        if raw.get("max_open_positions") is not None:
-            local["max_positions"] = raw["max_open_positions"]
-        if raw.get("profit_lock_pct") is not None:
-            local["profit_lock_pct"] = raw["profit_lock_pct"]
         if raw.get("autonomous") is not None:
             local["autonomous"] = raw["autonomous"]
         if raw.get("strategy_allocations") is not None:
-            local["strategy_allocations"] = raw["strategy_allocations"]
+            # Deep-merge — don't overwrite other strategies' allocations
+            existing_allocs = _load_local_settings().get("strategy_allocations", {})
+            existing_allocs.update(raw["strategy_allocations"])
+            local["strategy_allocations"] = existing_allocs
         if raw.get("strategy_risk") is not None:
             # Deep-merge per-strategy risk into existing strategy_risk
             existing_risk = _load_local_settings().get("strategy_risk", {})
@@ -146,18 +131,18 @@ def update_settings(
         data["dhan_access_token"] = raw["dhan_access_token"]
     if raw.get("seed_capital") is not None:
         data["seed_capital"] = raw["seed_capital"]
-    if raw.get("daily_loss_limit") is not None:
-        data["daily_loss_limit"] = abs(raw["daily_loss_limit"])
-    if raw.get("max_open_positions") is not None:
-        data["max_positions"] = raw["max_open_positions"]
-    if raw.get("profit_lock_pct") is not None:
-        data["profit_lock_pct"] = raw["profit_lock_pct"]
     if raw.get("autonomous") is not None:
         data["autonomous"] = raw["autonomous"]
     if raw.get("strategy_allocations") is not None:
-        data["strategy_allocations"] = raw["strategy_allocations"]
+        # Use dot-notation keys so Firestore merges at the strategy level,
+        # not overwrite the entire map (which would wipe other strategies)
+        for sid, amount in raw["strategy_allocations"].items():
+            data[f"strategy_allocations.{sid}"] = amount
     if raw.get("strategy_risk") is not None:
-        data["strategy_risk"] = raw["strategy_risk"]
+        for sid, risk in raw["strategy_risk"].items():
+            for field, value in risk.items():
+                if value is not None:
+                    data[f"strategy_risk.{sid}.{field}"] = value
     if raw.get("telegram_connected") is False:
         data["telegram_chat_id"] = None
 

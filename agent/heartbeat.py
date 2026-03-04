@@ -347,7 +347,7 @@ def run() -> str:
             return "TOKEN_EXPIRED: Your Dhan access token has expired. Update it in Settings to resume trading."
         return "HEARTBEAT_OK"
 
-    # ── 2. Daily loss limit (agent P&L from Dhan positions) ───────────────
+    # ── 2. Compute day P&L for trigger evaluation (no halt — max_drawdown in RiskGuard) ──
     pnl_data = _load_agent_pnl()
     tracked_symbols: set[str] = set(pnl_data.get("tracked_symbols", []))
     day_pnl = 0.0
@@ -362,10 +362,9 @@ def run() -> str:
                         day_pnl += float(p.get("unrealizedProfit", 0) or 0)
         except Exception:
             pass
-    if day_pnl < ctx.daily_loss_limit:
-        return f"HALT: Daily loss limit breached. agent_pnl=₹{day_pnl:.2f}"
+    # Note: daily_loss_limit removed — max_drawdown_pct is enforced in RiskGuard.validate()
 
-    # ── 2. Open position hard exits ────────────────────────────────────────
+    # ── 3. Open position hard exits ────────────────────────────────────────
     tracked = load_tracked_positions()
     live_symbols: set[str] = set()
 
@@ -400,24 +399,20 @@ def run() -> str:
             logger.debug("%s LTP=%.2f entry=%.2f SL=%.2f target=%.2f", symbol, ltp, entry, sl, target)
 
             if ltp <= sl:
-                result = exit_position(symbol, sec_id, qty, f"Stop loss hit: LTP ₹{ltp:.2f} ≤ SL ₹{sl:.2f}")
+                realized = (ltp - entry) * qty  # negative for losses
+                result = exit_position(symbol, sec_id, qty, f"Stop loss hit: LTP ₹{ltp:.2f} ≤ SL ₹{sl:.2f}", realized_pnl=realized)
                 alerts.append(f"SL hit {symbol}: exit @ ₹{ltp:.2f} (SL ₹{sl:.2f})")
                 logger.info("Stop loss exit %s: %s", symbol, result)
                 continue
 
             if target and ltp >= target:
-                result = exit_position(symbol, sec_id, qty, f"Target reached: LTP ₹{ltp:.2f} ≥ target ₹{target:.2f}")
+                realized = (ltp - entry) * qty  # positive
+                result = exit_position(symbol, sec_id, qty, f"Target reached: LTP ₹{ltp:.2f} ≥ target ₹{target:.2f}", realized_pnl=realized)
                 alerts.append(f"Target {symbol}: exit @ ₹{ltp:.2f} (target ₹{target:.2f})")
                 logger.info("Target exit %s: %s", symbol, result)
                 continue
 
-            if ltp >= entry * (1 + ctx.profit_lock_pct):
-                result = exit_position(symbol, sec_id, qty, f"Profit lock +{ctx.profit_lock_pct*100:.0f}%: LTP ₹{ltp:.2f}")
-                alerts.append(f"Profit lock {symbol}: exit @ ₹{ltp:.2f} (+{((ltp/entry)-1)*100:.1f}%)")
-                logger.info("Profit lock exit %s: %s", symbol, result)
-                continue
-
-    # ── 3. Triggers (hard + soft) ──────────────────────────────────────────
+    # ── 4. Triggers (hard + soft) ──────────────────────────────────────────
     # Entry window for price_in_range triggers: 9:45 AM to 3:10 PM IST
     is_entry_window = (9, 45) <= (now.hour, now.minute) < (15, 10)
     trigger_alerts = _evaluate_triggers(now, tracked, live_symbols, day_pnl, ltp_cache, is_entry_window)

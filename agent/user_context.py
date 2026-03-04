@@ -35,8 +35,6 @@ class UserContext:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
         # ── risk / financial settings ──────────────────────────────────────
-        self.daily_loss_limit      = -abs(doc.get("daily_loss_limit", 500))
-        self.profit_lock_pct       = doc.get("profit_lock_pct", 4) / 100
         self.strategy_allocations: dict = doc.get("strategy_allocations", {})
 
         from data.dhan_client import DhanClient
@@ -46,10 +44,15 @@ class UserContext:
             client_id    = doc.get("dhan_client_id"),
             access_token = doc.get("dhan_access_token"),
         )
-        self.risk = RiskGuard(
-            seed_capital   = doc.get("seed_capital", 10000),
-            max_positions  = doc.get("max_positions", 2),
-        )
+
+        seed_capital = doc.get("seed_capital", 10000)
+        self.risk = RiskGuard(seed_capital=seed_capital)
+        self.risk_by_strategy: dict[str, RiskGuard] = {}
+        for strategy_id, sr in doc.get("strategy_risk", {}).items():
+            self.risk_by_strategy[strategy_id] = RiskGuard(
+                seed_capital=seed_capital,
+                max_risk_per_trade_pct=sr.get("max_risk_per_trade_pct", 2.0),
+            )
 
 
 def get_user_ctx() -> UserContext:
@@ -79,10 +82,8 @@ def _get_default_ctx() -> UserContext:
         "dhan_client_id":    os.environ.get("DHAN_CLIENT_ID"),
         "dhan_access_token": os.environ.get("DHAN_ACCESS_TOKEN"),
         "seed_capital":      float(os.environ.get("SEED_CAPITAL", "10000")),
-        "daily_loss_limit":  500,
-        "profit_lock_pct":   4,
+
         "autonomous":        os.environ.get("AUTONOMOUS", "false").lower() == "true",
-        "max_positions":     2,
     }
     if _LOCAL_SETTINGS_PATH.exists():
         try:

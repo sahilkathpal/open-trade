@@ -131,9 +131,18 @@ def _load_agent_pnl() -> dict:
             data = json.loads(path.read_text())
             if data.get("date") == today:
                 return data
+            # Date changed — reset daily fields but preserve all cumulative totals
+            fresh = {
+                "date": today,
+                "tracked_symbols": [],
+                "cumulative_realized":          data.get("cumulative_realized", 0.0),
+                "strategy_cumulative_realized": data.get("strategy_cumulative_realized", {}),
+            }
+            _save_agent_pnl(fresh)
+            return fresh
         except Exception:
             pass
-    return {"date": today, "tracked_symbols": [], "realized": 0.0}
+    return {"date": today, "tracked_symbols": [], "cumulative_realized": 0.0, "strategy_cumulative_realized": {}}
 
 
 def _save_agent_pnl(data: dict):
@@ -150,7 +159,13 @@ def get_agent_pnl() -> dict:
 def reset_agent_pnl():
     """Reset agent P&L for a new trading session (premarket or catchup)."""
     today = datetime.now(_IST).strftime("%Y-%m-%d")
-    _save_agent_pnl({"date": today, "tracked_symbols": [], "realized": 0.0})
+    pnl_data = _load_agent_pnl()
+    _save_agent_pnl({
+        "date": today,
+        "tracked_symbols": [],
+        "cumulative_realized":          pnl_data.get("cumulative_realized", 0.0),
+        "strategy_cumulative_realized": pnl_data.get("strategy_cumulative_realized", {}),
+    })
 
 
 def _extract_ltp(quote: dict) -> float | None:
@@ -291,6 +306,8 @@ def place_trade(
     target_price: float = 0.0,
     approved: bool = False,
     expires_at: str = "",
+    strategy_id: str = "intraday",
+    product_type: str = "INTRA",
 ) -> dict:
     ctx = get_user_ctx()
 
@@ -306,16 +323,47 @@ def place_trade(
             pass
 
     # 1. Always run risk validation first
-    funds = ctx.dhan.get_funds()
-    positions = ctx.dhan.get_positions()
-    ok, reason = ctx.risk.validate(
+
+    # Reject immediately if no capital has been explicitly allocated to this strategy
+    strategy_allocation = ctx.strategy_allocations.get(strategy_id, 0)
+    if strategy_allocation <= 0:
+        reason = f"No capital allocated to strategy '{strategy_id}' — set allocation in Guardrails before trading"
+        _append_activity(f"GUARDRAIL BLOCKED [{strategy_id}]: place_trade {symbol} — {reason}")
+        return {"status": "rejected", "reason": reason}
+
+    # Reject if the strategy is explicitly paused
+    _strategies = list_registered_strategies()
+    _strategy_entry = next((s for s in _strategies if s["id"] == strategy_id), None)
+    if _strategy_entry and _strategy_entry.get("status") == "paused":
+        reason = f"Strategy '{strategy_id}' is paused — resume it to allow new entries"
+        _append_activity(f"STRATEGY PAUSED [{strategy_id}]: place_trade {symbol} blocked — {reason}")
+        return {"status": "rejected", "reason": reason}
+
+    guard = ctx.risk_by_strategy.get(strategy_id) or ctx.risk
+
+    # Allocation is the hard cap — compute remaining room in this strategy
+    try:
+        _positions_path = ctx.memory_dir / "OPEN_POSITIONS.json"
+        _open = json.loads(_positions_path.read_text()) if _positions_path.exists() else {}
+        _deployed = sum(
+            p["entry_price"] * p["quantity"]
+            for p in _open.values()
+            if p.get("strategy_id") == strategy_id
+        )
+    except Exception:
+        _deployed = 0.0
+    remaining_allocation = max(0.0, strategy_allocation - _deployed)
+    broker_available = ctx.dhan.get_funds().get("available_balance", 0)
+
+    ok, reason = guard.validate(
         entry_price=entry_price,
         quantity=quantity,
         stop_loss_price=stop_loss_price,
-        open_position_count=len(positions),
-        available_funds=funds.get("available_balance", 0),
+        available_funds=min(broker_available, remaining_allocation),
+        strategy_allocation=strategy_allocation,
     )
     if not ok:
+        _append_activity(f"GUARDRAIL BLOCKED [{strategy_id}]: place_trade {symbol} — {reason}")
         return {"status": "rejected", "reason": reason}
 
     # 2. Check approval requirement
@@ -380,7 +428,7 @@ def place_trade(
         txn_type="BUY",
         qty=quantity,
         order_type="MARKET",
-        product_type="INTRA",
+        product_type=product_type,
         price=0,
     )
 
@@ -390,7 +438,7 @@ def place_trade(
         txn_type="SELL",
         qty=quantity,
         order_type="STOPLIMIT",
-        product_type="INTRA",
+        product_type=product_type,
         price=stop_loss_price,
         trigger_price=round(stop_loss_price * 1.001, 2),
     )
@@ -408,6 +456,8 @@ def place_trade(
         "target_price":    target_price,
         "quantity":        quantity,
         "sl_order_id":     sl_order_id,
+        "product_type":    guard.product_type,
+        "strategy_id":     strategy_id,
     }
     _save_open_positions(open_positions)
 
@@ -433,18 +483,19 @@ def place_trade(
     }
 
 
-def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> dict:
+def exit_position(symbol: str, security_id: str, quantity: int, reason: str, realized_pnl: float = 0.0) -> dict:
     try:
         ctx = get_user_ctx()
         open_positions = _load_open_positions()
         pos_data = open_positions.get(symbol, {})
+        product_type = pos_data.get("product_type", "INTRA")
 
         resp = ctx.dhan.place_order(
             security_id=security_id,
             txn_type="SELL",
             qty=quantity,
             order_type="MARKET",
-            product_type="INTRA",
+            product_type=product_type,
             price=0,
         )
 
@@ -454,6 +505,17 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str) -> 
                 ctx.dhan.cancel_order(sl_order_id)
             except Exception:
                 pass
+
+        # Update cumulative realized P&L (portfolio-level and per-strategy)
+        if realized_pnl != 0.0:
+            pnl_data = _load_agent_pnl()
+            pnl_data["cumulative_realized"] = pnl_data.get("cumulative_realized", 0.0) + realized_pnl
+            strategy_id = pos_data.get("strategy_id", "")
+            if strategy_id:
+                sc = pnl_data.get("strategy_cumulative_realized", {})
+                sc[strategy_id] = sc.get(strategy_id, 0.0) + realized_pnl
+                pnl_data["strategy_cumulative_realized"] = sc
+            _save_agent_pnl(pnl_data)
 
         open_positions.pop(symbol, None)
         _save_open_positions(open_positions)
@@ -942,6 +1004,7 @@ ALL_TOOL_SCHEMAS = [
                 "target_price":     {"type": "number", "description": "Estimated target price for R:R calculation"},
                 "approved":         {"type": "boolean", "default": False},
                 "expires_at":       {"type": "string", "description": "ISO 8601 datetime when this proposal expires. Defaults to 15:00 IST today for intraday MIS trades. Set later for CNC/delivery trades or when the entry window extends beyond 3 PM."},
+                "strategy_id":      {"type": "string", "description": "Strategy identifier (e.g. 'intraday', 'swing'). Defaults to 'intraday'. Used to select per-strategy risk guardrails and product type.", "default": "intraday"},
             },
             "required": ["symbol", "security_id", "transaction_type", "quantity",
                          "entry_price", "stop_loss_price", "thesis"],
@@ -953,10 +1016,11 @@ ALL_TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "symbol":      {"type": "string"},
-                "security_id": {"type": "string"},
-                "quantity":    {"type": "integer"},
-                "reason":      {"type": "string"},
+                "symbol":        {"type": "string"},
+                "security_id":   {"type": "string"},
+                "quantity":      {"type": "integer"},
+                "reason":        {"type": "string"},
+                "realized_pnl":  {"type": "number", "description": "Realized P&L for this exit in INR. Used to track cumulative drawdown.", "default": 0.0},
             },
             "required": ["symbol", "security_id", "quantity", "reason"],
         },

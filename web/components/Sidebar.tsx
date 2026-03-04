@@ -10,6 +10,8 @@ import {
   Plus,
   BarChart2,
   MessageSquare,
+  Pause,
+  Play,
 } from "lucide-react"
 import { useState, useEffect, useCallback } from "react"
 import clsx from "clsx"
@@ -65,6 +67,10 @@ export function Sidebar() {
   const [expandedStrategies, setExpandedStrategies] = useState<Record<string, boolean>>({})
   const [strategyThreads, setStrategyThreads] = useState<Record<string, ThreadMeta[]>>({})
   const [chatLoading, setChatLoading] = useState<Record<string, boolean>>({})
+
+  // Pause state
+  const [paused, setPaused] = useState(false)
+  const [pauseLoading, setPauseLoading] = useState(false)
 
   // Auto-expand portfolio section when on a portfolio thread
   useEffect(() => {
@@ -144,6 +150,32 @@ export function Sidebar() {
   useEffect(() => {
     if (activeStrategyId && activeThreadId) loadThreadsForStrategy(activeStrategyId)
   }, [activeThreadId, activeStrategyId, loadThreadsForStrategy])
+
+  // Fetch pause state
+  const fetchPauseState = useCallback(async () => {
+    try {
+      const res = await authFetch("/api/state")
+      if (!res.ok) return
+      const data = await res.json()
+      setPaused(data.paused ?? false)
+    } catch { /* silent */ }
+  }, [authFetch])
+
+  useEffect(() => {
+    fetchPauseState()
+    const interval = setInterval(fetchPauseState, 15000)
+    return () => clearInterval(interval)
+  }, [fetchPauseState])
+
+  const handlePauseResume = useCallback(async () => {
+    setPauseLoading(true)
+    try {
+      const endpoint = paused ? "/api/resume" : "/api/pause"
+      await authFetch(endpoint, { method: "POST" })
+      setPaused(!paused)
+    } catch { /* silent */ }
+    finally { setPauseLoading(false) }
+  }, [paused, authFetch])
 
   const handleNewChat = useCallback(async (strategyId: string) => {
     setChatLoading((prev) => ({ ...prev, [strategyId]: true }))
@@ -335,6 +367,27 @@ export function Sidebar() {
             <span>New strategy</span>
           </div>
         </div>
+      </div>
+
+      <div className="border-t border-border" />
+
+      {/* Pause / Resume */}
+      <div className="px-2 py-2">
+        <button
+          onClick={handlePauseResume}
+          disabled={pauseLoading}
+          className={clsx(
+            "w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors disabled:opacity-50",
+            paused
+              ? "text-accent-amber hover:bg-accent-amber/10"
+              : "text-text-muted hover:text-text-primary hover:bg-background/50"
+          )}
+        >
+          {paused ? <Play size={15} /> : <Pause size={15} />}
+          <span className="font-mono text-xs">
+            {pauseLoading ? "..." : paused ? "PAUSED" : "Pause agent"}
+          </span>
+        </button>
       </div>
 
       <div className="border-t border-border" />

@@ -53,7 +53,6 @@ Review the situation with fresh data and make a decision. Steps:
    - No action: after looking at the data, no action is warranted — note why
 
 Constraints:
-- Do not open new positions if 2 are already open or day P&L ≤ -₹400.
 - Do not chase — if the move already happened before you reviewed, note it and pass.
 - Be brief. Most trigger reviews resolve in 3-4 tool calls.""",
 
@@ -261,9 +260,9 @@ The user is talking to you through the open-trade web app. Here's what exists:
 - "New chat" button creates a fresh thread
 
 **Guardrails panel** (accessible from the strategy page header)
-- Seed capital, daily loss limit, max open positions, stop loss range
-- These map directly to the RiskGuard class — changes take effect immediately
-- The agent cannot override these limits; place_trade() is rejected if they're breached
+- Seed capital (portfolio-level); capital allocation + max risk per trade % (per strategy)
+- These are enforced in code — place_trade() is rejected if any limit is breached
+- The agent cannot override these limits or request changes to them
 
 **Agent controls** (top-right of strategy page)
 - Pause / Resume toggle — stops scheduled jobs when paused
@@ -290,8 +289,10 @@ The user is talking to you through the open-trade web app. Here's what exists:
 - Place trades, exit positions (subject to RiskGuard limits and autonomous mode)
 - Run screens, fetch news, get quotes on any NSE EQ symbol
 - Create and manage recurring scheduled jobs (write_schedule, remove_schedule, list_schedules)
-- On first use: establish the user's trading strategy, write STRATEGY.md, then set up a schedule
-  with Claude-authored prompts for each job (premarket screening, execution, EOD review, etc.)
+- On first use: establish the user's trading strategy, write STRATEGY.md (must specify order type —
+  MIS/INTRA for intraday/same-day exits, CNC for overnight or multi-day positions — plus entry
+  criteria, position sizing approach, volatility response, and concentration rules), then set up
+  a schedule with Claude-authored prompts for each job (premarket screening, execution, EOD review)
 
 **What Claude cannot do from chat**
 - Change Guardrails settings (user must use the Guardrails panel)

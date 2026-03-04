@@ -16,18 +16,19 @@ import {
   Zap,
   Wrench,
   X,
+  Pause,
+  Play,
 } from "lucide-react"
 import { useAuth } from "@/lib/auth"
 import { AppState, StrategyConfig, STRATEGY_CONFIGS } from "@/lib/types"
-import { RiskGauge } from "@/components/RiskGauge"
 import { ProposalCard } from "@/components/ProposalCard"
 import { PositionCard } from "@/components/PositionCard"
 import { TriggerCard } from "@/components/TriggerCard"
-import { TokenUsageCard } from "@/components/TokenUsageCard"
 import { MISCountdown } from "@/components/MISCountdown"
 import { ActivityFeed } from "@/components/ActivityFeed"
 import { MarkdownRenderer } from "@/components/MarkdownRenderer"
 import { StrategySettingsPanel } from "@/components/StrategySettingsPanel"
+import { PermissionCard, PermissionRequestItem } from "@/components/PermissionCard"
 
 type PanelSection = "trades" | "agent" | "documents" | "guardrails"
 
@@ -45,13 +46,6 @@ function formatINR(n: number): string {
 interface ToolCallItem {
   tool: string
   summary: string
-}
-
-interface PermissionRequestItem {
-  id: string
-  tool: string
-  inputs: Record<string, unknown>
-  status: "pending" | "accepted" | "rejected"
 }
 
 interface ChatMessage {
@@ -122,90 +116,9 @@ function AssistantMessage({
   )
 }
 
-function formatPermissionDescription(tool: string, inputs: Record<string, unknown>): string {
-  if (tool === "write_memory" && inputs.filename === "STRATEGY.md") {
-    return "Update STRATEGY.md"
-  }
-  if (tool === "write_schedule") {
-    const cron = inputs.cron ?? ""
-    const reason = inputs.reason ?? ""
-    const prompt = inputs.prompt ?? ""
-    return `Create schedule: ${reason}\nCron: ${cron}${prompt ? `\nPrompt: ${String(prompt).slice(0, 200)}${String(prompt).length > 200 ? "..." : ""}` : ""}`
-  }
-  if (tool === "write_trigger" && inputs.mode === "hard") {
-    const symbol = inputs.symbol ?? ""
-    const type = inputs.type ?? ""
-    const action = inputs.action ?? ""
-    return `Hard trigger: ${type}${symbol ? ` on ${symbol}` : ""}${action ? ` → ${action}` : ""}`
-  }
-  return `${tool}(${JSON.stringify(inputs).slice(0, 100)})`
-}
-
-function PermissionCard({
-  request,
-  onRespond,
-}: {
-  request: PermissionRequestItem
-  onRespond: (id: string, approved: boolean) => void
-}) {
-  const description = formatPermissionDescription(request.tool, request.inputs)
-  const isPending = request.status === "pending"
-
-  return (
-    <div className="flex justify-start">
-      <div className="bg-surface border border-accent-amber/40 rounded-xl px-4 py-3 max-w-lg w-full">
-        <div className="flex items-center gap-1.5 mb-2">
-          <ShieldCheck size={12} className="text-accent-amber" />
-          <span className="text-[11px] font-medium text-accent-amber">Permission Required</span>
-        </div>
-        <p className="text-xs font-mono text-text-muted mb-1">{request.tool}</p>
-        <p className="text-sm text-text-primary whitespace-pre-wrap mb-3 leading-relaxed">{description}</p>
-        {request.tool === "write_memory" && request.inputs.content != null && (
-          <details className="mb-3">
-            <summary className="text-xs text-text-muted cursor-pointer hover:text-text-primary">
-              Show content
-            </summary>
-            <pre className="mt-2 text-xs text-text-muted bg-bg rounded p-2 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">
-              {String(request.inputs.content as string)}
-            </pre>
-          </details>
-        )}
-        {isPending ? (
-          <div className="flex gap-2">
-            <button
-              onClick={() => onRespond(request.id, true)}
-              className="px-3 py-1.5 text-xs font-medium bg-accent-green/20 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/30 transition-colors"
-            >
-              Accept
-            </button>
-            <button
-              onClick={() => onRespond(request.id, false)}
-              className="px-3 py-1.5 text-xs font-medium bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition-colors"
-            >
-              Reject
-            </button>
-          </div>
-        ) : (
-          <span
-            className={`text-xs font-medium ${
-              request.status === "accepted" ? "text-accent-green" : "text-accent-red"
-            }`}
-          >
-            {request.status === "accepted" ? "Accepted" : "Rejected"}
-          </span>
-        )}
-      </div>
-    </div>
-  )
-}
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
 
-const CHAT_SUGGESTIONS = [
-  "Help me set up my trading strategy",
-  "Review this week's trades and learnings",
-  "Suggest improvements to my strategy",
-]
 
 function ChatArea({
   config,
@@ -511,18 +424,6 @@ function ChatArea({
             </div>
           )}
 
-          <div className="grid grid-cols-3 gap-3 w-full max-w-2xl">
-            {CHAT_SUGGESTIONS.map((prompt) => (
-              <button
-                key={prompt}
-                onClick={() => startChat(prompt)}
-                disabled={chatLoading}
-                className="bg-surface rounded-xl p-4 text-left border border-border hover:border-border/80 transition-colors text-xs text-text-muted leading-relaxed disabled:opacity-50 disabled:cursor-wait"
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
         </div>
 
         <div className="px-6 pb-6 shrink-0">
@@ -658,9 +559,17 @@ function ChatArea({
 function TradesContent({
   state,
   fetchState,
+  strategyId,
+  strategyAllocation,
+  maxRiskPct,
+  onOpenGuardrails,
 }: {
   state: AppState | null
   fetchState: () => void
+  strategyId: string
+  strategyAllocation?: number
+  maxRiskPct: number
+  onOpenGuardrails: () => void
 }) {
   if (!state) {
     return (
@@ -671,18 +580,37 @@ function TradesContent({
   }
 
   const agentPnl = state.agent_pnl ?? { realized: 0, unrealized: 0, total: 0 }
-  const lossLimit = state.daily_loss_limit ?? 500
-  const seedCapital = state.seed_capital ?? 10000
   const deployedNotional = state.positions.reduce(
     (sum, p) => sum + p.entry_price * p.quantity,
     0
   )
+  const cumulativeRealized = state.strategy_cumulative_realized?.[strategyId] ?? null
 
-  const pnlPct = seedCapital > 0 ? (agentPnl.total / seedCapital) * 100 : 0
+  const isAllocated = strategyAllocation != null && strategyAllocation > 0
+  const pnlPct = isAllocated ? (agentPnl.total / strategyAllocation!) * 100 : null
 
   return (
     <div className="px-4 py-4 space-y-4">
-      {/* 2-column stat summary — fits panel width */}
+
+      {/* Unallocated warning */}
+      {!isAllocated && (
+        <div className="rounded-lg border border-accent-amber/40 bg-accent-amber/5 px-4 py-3 flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-medium text-accent-amber">No capital allocated</p>
+            <p className="text-[11px] text-text-muted mt-0.5 leading-relaxed">
+              Claude will not place trades until you set an allocation for this strategy.
+            </p>
+          </div>
+          <button
+            onClick={onOpenGuardrails}
+            className="shrink-0 text-[11px] font-medium text-accent-amber underline underline-offset-2 hover:opacity-80 transition-opacity mt-0.5"
+          >
+            Set →
+          </button>
+        </div>
+      )}
+
+      {/* 2-column stat summary */}
       <div className="grid grid-cols-2 gap-3">
         <div className="bg-surface rounded-lg border border-border p-3">
           <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5">P&L Today</div>
@@ -690,20 +618,41 @@ function TradesContent({
             {formatINR(agentPnl.total)}
           </div>
           <div className="text-[11px] text-text-muted font-mono mt-1">
-            {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}% · {formatINR(agentPnl.realized)} realized
+            {pnlPct != null
+              ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% · `
+              : ""}
+            {formatINR(agentPnl.realized)} realized
           </div>
         </div>
         <div className="bg-surface rounded-lg border border-border p-3">
-          <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5">Capital</div>
-          <div className="font-mono text-lg leading-none text-text-primary">
-            {formatINR(seedCapital)}
-          </div>
-          <div className="text-[11px] text-text-muted font-mono mt-1">
-            {formatINR(deployedNotional)} deployed
-          </div>
+          <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5">Allocated</div>
+          {isAllocated ? (
+            <>
+              <div className="font-mono text-lg leading-none text-text-primary">
+                {formatINR(strategyAllocation!)}
+              </div>
+              <div className="text-[11px] text-text-muted font-mono mt-1">
+                {formatINR(deployedNotional)} deployed
+              </div>
+            </>
+          ) : (
+            <div className="font-mono text-lg leading-none text-text-muted">—</div>
+          )}
         </div>
       </div>
-      <RiskGauge dayPnl={agentPnl.total} limit={lossLimit} />
+
+      {/* Cumulative realized P&L for this strategy */}
+      {cumulativeRealized !== null && (
+        <div className="bg-surface rounded-lg border border-border p-3">
+          <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5">All-time Realized</div>
+          <div className={`font-mono text-base leading-none ${cumulativeRealized >= 0 ? "text-accent-green" : "text-accent-red"}`}>
+            {formatINR(cumulativeRealized)}
+          </div>
+          <div className="text-[11px] text-text-muted font-mono mt-1">
+            since strategy started
+          </div>
+        </div>
+      )}
 
       {Object.keys(state.pending_approvals).length > 0 && (
         <div className="space-y-2">
@@ -714,6 +663,7 @@ function TradesContent({
             <ProposalCard
               key={symbol}
               {...params}
+              tradeRiskLimit={strategyAllocation && maxRiskPct ? strategyAllocation * maxRiskPct / 100 : undefined}
               onApproved={fetchState}
               onDenied={fetchState}
             />
@@ -742,12 +692,36 @@ function TradesContent({
 
 // ── Agent panel content ────────────────────────────────────────────────────────
 
-const JOB_LABELS: Record<string, string> = {
-  premarket: "Pre-market screening",
-  execution: "Execution planning",
-  heartbeat: "Heartbeat (every 1 min)",
-  clear_proposals: "Clear proposals",
-  eod: "EOD report",
+function formatLastRun(iso: string): string {
+  const istOpts = { timeZone: "Asia/Kolkata" } as const
+  const todayDate = new Date().toLocaleDateString("en-IN", istOpts)
+  const tDate = new Date(iso).toLocaleDateString("en-IN", istOpts)
+  const timeStr = new Date(iso).toLocaleTimeString("en-IN", { ...istOpts, hour: "2-digit", minute: "2-digit", hour12: false })
+  if (todayDate === tDate) return timeStr
+  const tomorrowDate = new Date(Date.now() + 86400000).toLocaleDateString("en-IN", istOpts)
+  if (tDate === tomorrowDate) return `tomorrow · ${timeStr}`
+  const dateStr = new Date(iso).toLocaleDateString("en-IN", { ...istOpts, weekday: "short" })
+  return `${dateStr} · ${timeStr}`
+}
+
+function formatRelative(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now()
+  if (ms <= 0) return "now"
+  const sec = Math.round(ms / 1000)
+  if (sec < 90) return `in ${sec}s`
+  const min = Math.round(ms / 60000)
+  if (min < 60) return `in ${min}m`
+  const hr = Math.floor(min / 60)
+  const remMin = min % 60
+  const istOpts = { timeZone: "Asia/Kolkata" } as const
+  const todayDate = new Date().toLocaleDateString("en-IN", istOpts)
+  const tDate = new Date(iso).toLocaleDateString("en-IN", istOpts)
+  const timeStr = new Date(iso).toLocaleTimeString("en-IN", { ...istOpts, hour: "2-digit", minute: "2-digit", hour12: false })
+  if (todayDate === tDate) return remMin === 0 ? `in ${hr}h` : `in ${hr}h ${remMin}m`
+  const tomorrowDate = new Date(Date.now() + 86400000).toLocaleDateString("en-IN", istOpts)
+  if (tDate === tomorrowDate) return `tomorrow · ${timeStr}`
+  const dateStr = new Date(iso).toLocaleDateString("en-IN", { ...istOpts, day: "numeric", month: "short" })
+  return `${dateStr} · ${timeStr}`
 }
 
 function AgentContent({
@@ -766,7 +740,7 @@ function AgentContent({
     setPauseLoading(true)
     try {
       await authFetch(state.paused ? "/api/resume" : "/api/pause", { method: "POST" })
-      await fetchState()
+      fetchState()
     } finally {
       setPauseLoading(false)
     }
@@ -782,15 +756,23 @@ function AgentContent({
 
   return (
     <div className="px-4 py-4 space-y-4">
-      {state.token_usage && (
-        <TokenUsageCard usage={state.token_usage} />
-      )}
-
       <div className="bg-surface rounded-lg border border-border p-4">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-xs font-medium text-text-muted uppercase tracking-wider">
-            Schedule
-          </h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs font-medium text-text-muted uppercase tracking-wider">
+              Schedule
+            </h3>
+            {!state.paused && (
+              <span className={[
+                "text-[10px] font-mono px-1.5 py-0.5 rounded border",
+                state.autonomous
+                  ? "text-accent-green border-accent-green/30 bg-accent-green/10"
+                  : "text-text-muted border-border",
+              ].join(" ")}>
+                {state.autonomous ? "autonomous" : "manual"}
+              </span>
+            )}
+          </div>
           <button
             onClick={togglePause}
             disabled={pauseLoading}
@@ -812,41 +794,32 @@ function AgentContent({
           <p className="text-xs text-text-muted">No upcoming jobs</p>
         ) : (
           <div className="space-y-1">
-            {state.upcoming_jobs.map((job) => {
-              const t = new Date(job.next_run)
-              const timeStr = t.toLocaleTimeString("en-IN", {
-                hour: "2-digit",
-                minute: "2-digit",
-                timeZone: "Asia/Kolkata",
-                hour12: false,
-              })
-              const isToday = new Date().toDateString() === t.toDateString()
-              const dateStr = t.toLocaleDateString("en-IN", {
-                day: "numeric",
-                month: "short",
-                timeZone: "Asia/Kolkata",
-              })
-              return (
-                <div
-                  key={job.id}
-                  className="flex items-center justify-between text-xs py-1.5 border-b border-border/50 last:border-0"
-                >
+            {state.upcoming_jobs.map((job) => (
+              <div
+                key={job.id}
+                className="flex items-center justify-between text-xs py-1.5 border-b border-border/50 last:border-0"
+              >
+                <div className="flex flex-col gap-0.5">
                   <span
                     className={
                       state.paused
                         ? "font-mono text-text-muted line-through"
-                        : "font-mono text-accent-amber"
+                        : "font-mono text-text-primary"
                     }
                   >
-                    {JOB_LABELS[job.id] ?? job.id}
+                    {(job.label ?? job.id).split(":")[0]}
                   </span>
-                  <span className="text-text-muted font-mono">
-                    {isToday ? "" : dateStr + " · "}
-                    {timeStr} IST
-                  </span>
+                  {job.last_run && (
+                    <span className="font-mono text-[10px] text-text-muted">
+                      last run {formatLastRun(job.last_run)}
+                    </span>
+                  )}
                 </div>
-              )
-            })}
+                <span className="text-text-muted font-mono">
+                  {formatRelative(job.next_run)}
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -871,76 +844,76 @@ function AgentContent({
 
 // ── Documents panel content ────────────────────────────────────────────────────
 
+const FILE_TITLES: Record<string, string> = {
+  "STRATEGY.md":  "Strategy Playbook",
+  "MARKET.md":    "Daily Market Brief",
+  "JOURNAL.md":   "Trade Journal",
+  "LEARNINGS.md": "Learnings",
+  "ACTIVITY.md":  "Activity Log",
+  "SOUL.md":      "Soul",
+  "HEARTBEAT.md": "Heartbeat",
+}
+
+function fileTitle(filename: string): string {
+  return FILE_TITLES[filename] ?? filename.replace(/\.md$/i, "").replace(/[_-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
 function DocumentsContent({
-  strategy,
   authFetch,
 }: {
-  strategy: string
   authFetch: ReturnType<typeof useAuth>["authFetch"]
 }) {
-  const config = STRATEGY_CONFIGS[strategy]
-  const [selectedDocId, setSelectedDocId] = useState<string | null>(null)
+  const [files, setFiles] = useState<{ filename: string; last_modified: string }[]>([])
+  const [filesLoading, setFilesLoading] = useState(true)
+  const [selected, setSelected] = useState<string | null>(null)
   const [content, setContent] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [contentLoading, setContentLoading] = useState(false)
+
+  useEffect(() => {
+    authFetch("/api/memory")
+      .then((r) => r.json())
+      .then(setFiles)
+      .catch(() => setFiles([]))
+      .finally(() => setFilesLoading(false))
+  }, [authFetch])
 
   const fetchDoc = useCallback(
-    async (file: string) => {
-      setLoading(true)
+    async (filename: string) => {
+      setContentLoading(true)
       setContent(null)
       try {
-        const res = await authFetch(`/api/memory/${file}`)
-        if (!res.ok) {
-          setContent("")
-          return
-        }
-        const raw = await res.text()
-        try {
-          const json = JSON.parse(raw)
-          setContent(json.content ?? "")
-        } catch {
-          setContent(raw)
-        }
+        const res = await authFetch(`/api/memory/${filename}`)
+        if (!res.ok) { setContent(""); return }
+        const json = await res.json()
+        setContent(json.content ?? "")
       } catch {
         setContent("")
       } finally {
-        setLoading(false)
+        setContentLoading(false)
       }
     },
     [authFetch]
   )
 
   useEffect(() => {
-    if (selectedDocId) {
-      const doc = config?.documents.find((d) => d.id === selectedDocId)
-      if (doc) fetchDoc(doc.file)
-    }
-  }, [selectedDocId, config, fetchDoc])
+    if (selected) fetchDoc(selected)
+  }, [selected, fetchDoc])
 
-  if (!config || config.documents.length === 0) {
-    return (
-      <div className="px-4 py-8 text-center text-text-muted text-sm">
-        No documents yet. Claude will create documents as it starts trading.
-      </div>
-    )
-  }
-
-  const selectedDoc = config.documents.find((d) => d.id === selectedDocId)
-
-  if (selectedDoc) {
+  if (selected) {
     return (
       <div>
         <div className="sticky top-0 bg-surface z-10 flex items-center gap-2 px-4 py-2.5 border-b border-border">
           <button
-            onClick={() => { setSelectedDocId(null); setContent(null) }}
+            onClick={() => { setSelected(null); setContent(null) }}
             className="flex items-center gap-1 text-xs text-text-muted hover:text-text-primary transition-colors"
           >
             <ChevronLeft size={13} />
             Docs
           </button>
           <span className="text-border text-xs">·</span>
-          <span className="text-xs text-text-primary truncate">{selectedDoc.title}</span>
+          <span className="text-xs text-text-primary truncate">{fileTitle(selected)}</span>
           <button
-            onClick={() => fetchDoc(selectedDoc.file)}
+            onClick={() => fetchDoc(selected)}
             className="ml-auto p-1 text-text-muted hover:text-text-primary transition-colors shrink-0"
             title="Refresh"
           >
@@ -948,13 +921,11 @@ function DocumentsContent({
           </button>
         </div>
         <div className="px-4 py-4">
-          {loading && <p className="text-text-muted text-sm">Loading...</p>}
-          {!loading && !content && (
-            <p className="text-text-muted text-sm">
-              No content yet. Claude will write this document as it starts trading.
-            </p>
+          {contentLoading && <p className="text-text-muted text-sm">Loading...</p>}
+          {!contentLoading && !content && (
+            <p className="text-text-muted text-sm">No content yet.</p>
           )}
-          {!loading && content && <MarkdownRenderer content={content} />}
+          {!contentLoading && content && <MarkdownRenderer content={content} />}
         </div>
       </div>
     )
@@ -962,24 +933,31 @@ function DocumentsContent({
 
   return (
     <div className="px-4 py-4">
-      <p className="text-xs text-text-muted mb-4">
-        Claude writes and updates these documents as it learns and trades.
-      </p>
-      <div className="space-y-2">
-        {config.documents.map((doc) => (
-          <button
-            key={doc.id}
-            onClick={() => setSelectedDocId(doc.id)}
-            className="w-full bg-surface rounded-lg p-4 text-left border border-border hover:border-border/80 transition-colors flex items-start gap-3"
-          >
-            <FileText size={15} className="text-text-muted mt-0.5 shrink-0" />
-            <div>
-              <p className="text-sm font-medium text-text-primary mb-0.5">{doc.title}</p>
-              <p className="text-xs text-text-muted leading-relaxed">{doc.description}</p>
-            </div>
-          </button>
-        ))}
-      </div>
+      {filesLoading ? (
+        <p className="text-text-muted text-sm text-center py-8">Loading...</p>
+      ) : files.length === 0 ? (
+        <p className="text-text-muted text-sm text-center py-8">
+          No documents yet. Claude will create these as it starts trading.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {files.map((f) => (
+            <button
+              key={f.filename}
+              onClick={() => setSelected(f.filename)}
+              className="w-full bg-surface rounded-lg px-4 py-3 text-left border border-border hover:border-border/80 transition-colors flex items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <FileText size={14} className="text-text-muted shrink-0" />
+                <span className="text-sm text-text-primary truncate">{fileTitle(f.filename)}</span>
+              </div>
+              <span className="text-[10px] font-mono text-text-muted shrink-0">
+                {f.filename}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -997,11 +975,6 @@ const GENERIC_CONFIG: Omit<StrategyConfig, "id" | "name"> = {
   live: true,
   goal: "",
   subtitle: "",
-  documents: [
-    { id: "strategy", title: "Strategy", file: "STRATEGY.md", description: "Strategy rules and criteria." },
-    { id: "journal",  title: "Journal",  file: "JOURNAL.md",  description: "Trade log." },
-    { id: "learnings", title: "Learnings", file: "LEARNINGS.md", description: "Distilled observations." },
-  ],
 }
 
 export default function StrategyPage() {
@@ -1010,6 +983,7 @@ export default function StrategyPage() {
   const strategyId = params.strategy as string
   const threadId = searchParams.get("t")
   const [registryName, setRegistryName] = useState<string | null>(null)
+  const [strategyPaused, setStrategyPaused] = useState(false)
 
   const hardcodedConfig = STRATEGY_CONFIGS[strategyId]
   const config: StrategyConfig = hardcodedConfig ?? {
@@ -1023,6 +997,8 @@ export default function StrategyPage() {
   const [catchupLoading, setCatchupLoading] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [panelSection, setPanelSection] = useState<PanelSection>("trades")
+  const [strategyAllocation, setStrategyAllocation] = useState<number>(0)
+  const [maxRiskPct, setMaxRiskPct] = useState<number>(2)
   const [panelWidth, setPanelWidth] = useState(360)
   const resizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null)
 
@@ -1043,14 +1019,16 @@ export default function StrategyPage() {
     document.addEventListener("mouseup", onUp)
   }, [panelWidth])
 
-  // For strategies not in STRATEGY_CONFIGS, fetch the name from the registry
+  // Fetch strategy registry: name (for dynamic strategies) + paused status
   useEffect(() => {
-    if (hardcodedConfig) return
     authFetch("/api/strategies")
       .then((r) => r.ok ? r.json() : [])
-      .then((list: {id: string; name: string}[]) => {
+      .then((list: {id: string; name: string; status: string}[]) => {
         const entry = list.find((s) => s.id === strategyId)
-        if (entry) setRegistryName(entry.name)
+        if (entry) {
+          if (!hardcodedConfig) setRegistryName(entry.name)
+          setStrategyPaused(entry.status === "paused")
+        }
       })
       .catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1067,11 +1045,26 @@ export default function StrategyPage() {
     }
   }, [authFetch])
 
+  const fetchStrategySettings = useCallback(async () => {
+    try {
+      const res = await authFetch("/api/settings")
+      if (!res.ok) return
+      const data = await res.json()
+      const alloc = data.strategy_allocations?.[strategyId]
+      if (alloc != null) setStrategyAllocation(alloc)
+      const pct = data.strategy_risk?.[strategyId]?.max_risk_per_trade_pct
+      if (pct != null) setMaxRiskPct(pct)
+    } catch {
+      // silent
+    }
+  }, [authFetch, strategyId])
+
   useEffect(() => {
     fetchState()
+    fetchStrategySettings()
     const interval = setInterval(fetchState, 10000)
     return () => clearInterval(interval)
-  }, [fetchState])
+  }, [fetchState, fetchStrategySettings])
 
   const togglePanel = useCallback((section: PanelSection) => {
     if (panelOpen && panelSection === section) {
@@ -1091,12 +1084,20 @@ export default function StrategyPage() {
     }
   }, [authFetch])
 
-  // Risk color for Guardrails button
-  const dayLoss = state ? (state.agent_pnl?.total ?? 0) : 0
-  const lossUsed = dayLoss < 0 ? Math.abs(dayLoss) : 0
-  const lossLimit = state?.daily_loss_limit ?? 0
-  const lossPct = lossLimit > 0 ? (lossUsed / lossLimit) * 100 : 0
-  const riskLevel = lossPct > 80 ? "alert" : lossPct > 50 ? "caution" : "safe"
+  const togglePause = useCallback(async () => {
+    const newStatus = strategyPaused ? "active" : "paused"
+    try {
+      await authFetch(`/api/strategies/${strategyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus }),
+      })
+      setStrategyPaused(!strategyPaused)
+    } catch { /* silent */ }
+  }, [authFetch, strategyId, strategyPaused])
+
+  // Risk color for Guardrails button — amber when strategy has no allocation set
+  const riskLevel = strategyAllocation === 0 ? "caution" : "safe"
 
   if (!config) {
     return (
@@ -1155,7 +1156,23 @@ export default function StrategyPage() {
         </div>
       )}
 
-      {state && state.catchup_available && (
+      {strategyPaused && (
+        <div className="flex items-center justify-between bg-accent-amber/10 border-b border-accent-amber/30 px-5 py-2.5 text-xs shrink-0">
+          <div className="flex items-center gap-2">
+            <Pause size={13} className="text-accent-amber shrink-0" />
+            <span className="text-accent-amber font-medium">Strategy paused</span>
+            <span className="text-text-muted">— no new trades will be placed.</span>
+          </div>
+          <button
+            onClick={togglePause}
+            className="ml-4 shrink-0 text-accent-amber font-medium underline underline-offset-2 hover:opacity-80"
+          >
+            Resume
+          </button>
+        </div>
+      )}
+
+      {state && state.catchup_available && !strategyPaused && (
         <div className="flex items-center justify-between bg-accent-green/10 border-b border-accent-green/30 px-5 py-2.5 text-xs shrink-0">
           <div className="flex items-center gap-2">
             <span className="text-accent-green font-medium">Market is open</span>
@@ -1174,7 +1191,23 @@ export default function StrategyPage() {
       )}
 
       {/* Header: panel toggle buttons */}
-      <div className="border-b border-border shrink-0 flex items-center justify-end px-4 py-1.5 gap-1">
+      <div className="border-b border-border shrink-0 flex items-center justify-between px-4 py-1.5">
+        {/* Pause/Resume toggle */}
+        <button
+          onClick={togglePause}
+          className={[
+            "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors",
+            strategyPaused
+              ? "text-accent-amber hover:text-text-primary hover:bg-surface/60"
+              : "text-text-muted hover:text-text-primary hover:bg-surface/60",
+          ].join(" ")}
+          title={strategyPaused ? "Resume strategy" : "Pause strategy"}
+        >
+          {strategyPaused ? <Play size={13} /> : <Pause size={13} />}
+          <span className="hidden sm:inline">{strategyPaused ? "Resume" : "Pause"}</span>
+        </button>
+
+        <div className="flex items-center gap-1">
         {PANEL_TABS.map(({ id, label, icon: Icon }) => {
           const isActive = panelOpen && panelSection === id
           const isGuardrails = id === "guardrails"
@@ -1201,6 +1234,7 @@ export default function StrategyPage() {
             </button>
           )
         })}
+        </div>
       </div>
 
       {/* Main: chat + right panel */}
@@ -1253,19 +1287,26 @@ export default function StrategyPage() {
             {/* Section content */}
             <div className="flex-1 overflow-y-auto">
               {panelSection === "trades" && (
-                <TradesContent state={state} fetchState={fetchState} />
+                <TradesContent
+                  state={state}
+                  fetchState={fetchState}
+                  strategyId={strategyId}
+                  strategyAllocation={strategyAllocation}
+                  maxRiskPct={maxRiskPct}
+                  onOpenGuardrails={() => togglePanel("guardrails")}
+                />
               )}
               {panelSection === "agent" && (
                 <AgentContent state={state} fetchState={fetchState} authFetch={authFetch} />
               )}
               {panelSection === "documents" && (
-                <DocumentsContent strategy={strategyId} authFetch={authFetch} />
+                <DocumentsContent authFetch={authFetch} />
               )}
               {panelSection === "guardrails" && (
                 <StrategySettingsPanel
                   embedded
                   state={state}
-                  onStateRefresh={fetchState}
+                  onStateRefresh={() => { fetchState(); fetchStrategySettings() }}
                   strategy={strategyId}
                 />
               )}

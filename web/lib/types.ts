@@ -32,13 +32,14 @@ export interface AppState {
   >
   market_open: boolean
   scheduler_status: { last_premarket: string | null; last_eod: string | null; last_heartbeat: string | null }
-  upcoming_jobs: Array<{ id: string; next_run: string }>
+  upcoming_jobs: Array<{ id: string; next_run: string; label?: string; last_run?: string | null }>
   token_usage: TokenUsage
   dhan_configured: boolean
   token_expired: boolean
   catchup_available: boolean
   agent_pnl?: { realized: number; unrealized: number; total: number }
-  daily_loss_limit?: number
+  cumulative_realized?: number
+  strategy_cumulative_realized?: Record<string, number>
   seed_capital?: number
   autonomous?: boolean
   paused?: boolean
@@ -55,20 +56,12 @@ export interface AppState {
   }>
 }
 
-export interface StrategyDocument {
-  id: string
-  title: string
-  file: string
-  description: string
-}
-
 export interface StrategyConfig {
   id: string
   name: string
   live: boolean
   goal: string
   subtitle: string
-  documents: StrategyDocument[]
 }
 
 export const STRATEGY_CONFIGS: Record<string, StrategyConfig> = {
@@ -79,28 +72,6 @@ export const STRATEGY_CONFIGS: Record<string, StrategyConfig> = {
     goal:
       "Trade NSE large-cap stocks intraday using momentum strategies. Claude screens pre-market, sets price triggers, and executes entries — exiting all positions by 3:10 PM.",
     subtitle: "NSE large-cap · MIS · exits by 3:10 PM",
-    documents: [
-      {
-        id: "market-brief",
-        title: "Daily Market Brief",
-        file: "MARKET.md",
-        description:
-          "Pre-market analysis, candidate screening, and execution plan. Updated each morning at 8:45 AM.",
-      },
-      {
-        id: "journal",
-        title: "Trade Journal",
-        file: "JOURNAL.md",
-        description: "Record of all trades, outcomes, and daily P&L.",
-      },
-      {
-        id: "strategy",
-        title: "Strategy Notes",
-        file: "STRATEGY.md",
-        description:
-          "Learnings and principles Claude accumulates over time to improve its trading decisions.",
-      },
-    ],
   },
 }
 
@@ -111,7 +82,6 @@ export const COMING_SOON_STRATEGIES: StrategyConfig[] = [
     live: false,
     goal: "Hold positions for 2–5 days to capture medium-term momentum across NSE stocks.",
     subtitle: "Multi-day positions · overnight risk management",
-    documents: [],
   },
   {
     id: "longterm",
@@ -120,7 +90,6 @@ export const COMING_SOON_STRATEGIES: StrategyConfig[] = [
     goal:
       "Build a portfolio of fundamentally strong stocks for multi-month holding periods, guided by qualitative research and news.",
     subtitle: "Fundamental analysis · buy and hold",
-    documents: [],
   },
   {
     id: "custom",
@@ -128,6 +97,5 @@ export const COMING_SOON_STRATEGIES: StrategyConfig[] = [
     live: false,
     goal: "Define your own trading thesis and let Claude build an execution framework around it.",
     subtitle: "Bring your own logic",
-    documents: [],
   },
 ]

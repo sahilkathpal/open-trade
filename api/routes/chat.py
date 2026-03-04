@@ -133,9 +133,7 @@ def _build_status_context(strategy: str) -> str:
         def _fmt(n: float) -> str:
             return f"+₹{n:.0f}" if n >= 0 else f"-₹{abs(n):.0f}"
 
-        lines.append(
-            f"Capital: ₹{seed:,.0f} allocated · ₹{deployed:,.0f} deployed"
-        )
+        lines.append(f"Capital: ₹{deployed:,.0f} deployed")
         lines.append(
             f"P&L today: {_fmt(realized)} realized · {_fmt(unrealized)} unrealized"
         )
@@ -166,9 +164,16 @@ def _build_status_context(strategy: str) -> str:
                 pass
 
         # ── Risk limits ───────────────────────────────────────────────────
-        loss_limit = abs(ctx.daily_loss_limit)
-        max_pos = ctx.risk.max_positions
-        lines.append(f"Risk limits: ₹{loss_limit:,.0f} daily loss limit · {max_pos} max positions")
+        allocation = ctx.strategy_allocations.get(strategy, 0)
+        guard = ctx.risk_by_strategy.get(strategy) or ctx.risk
+        if allocation > 0:
+            per_trade_limit = allocation * guard.max_risk_per_trade_pct / 100
+            lines.append(
+                f"Risk limits: ₹{seed:,.0f} seed · ₹{allocation:,.0f} allocated to this strategy"
+                f" · {guard.max_risk_per_trade_pct}% max per-trade risk (≤ ₹{per_trade_limit:.0f} per trade)"
+            )
+        else:
+            lines.append(f"Risk limits: ₹{seed:,.0f} seed · no allocation set for this strategy — trades blocked")
 
         return "\n".join(lines)
 

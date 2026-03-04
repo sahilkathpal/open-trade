@@ -34,17 +34,14 @@ export function StrategySettingsPanel({
   const { authFetch } = useAuth()
 
   // ── Per-strategy risk ──────────────────────────────────────────────────────
-  const [strategyMaxPositions, setStrategyMaxPositions] = useState<number>(2)
-  const [maxTradeSize, setMaxTradeSize] = useState<number>(25000)
-  const [stopLossPct, setStopLossPct] = useState<number>(1.5)
-  const [targetPct, setTargetPct] = useState<number | "">(3)
+  const [maxRiskPerTradePct, setMaxRiskPerTradePct] = useState<number>(2)
+  const [strategyAllocation, setStrategyAllocation] = useState<number>(0)
+  const [otherAllocated, setOtherAllocated] = useState<number>(0) // sum of other strategies
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [strategySaved, setStrategySaved] = useState(false)
 
   // ── Portfolio guardrails ───────────────────────────────────────────────────
   const [seedCapital, setSeedCapital] = useState<number>(state?.seed_capital ?? 0)
-  const [dailyLossLimit, setDailyLossLimit] = useState<number>(state?.daily_loss_limit ?? 0)
-  const [maxOpenPositions, setMaxOpenPositions] = useState<number>(2)
   const [savingRisk, setSavingRisk] = useState(false)
   const [riskSaved, setRiskSaved] = useState(false)
 
@@ -57,22 +54,22 @@ export function StrategySettingsPanel({
     if (!open && !embedded) return
     if (state) {
       setSeedCapital(state.seed_capital ?? 0)
-      setDailyLossLimit(state.daily_loss_limit ?? 0)
       setAutonomous(state.autonomous ?? false)
     }
     authFetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (!data) return
-        if (data.max_open_positions != null) setMaxOpenPositions(data.max_open_positions)
         if (strategy) {
           const sr = data.strategy_risk?.[strategy]
-          if (sr) {
-            if (sr.max_positions != null) setStrategyMaxPositions(sr.max_positions)
-            if (sr.max_trade_size != null) setMaxTradeSize(sr.max_trade_size)
-            if (sr.stop_loss_pct != null) setStopLossPct(sr.stop_loss_pct)
-            if (sr.target_pct != null) setTargetPct(sr.target_pct)
-          }
+          if (sr?.max_risk_per_trade_pct != null) setMaxRiskPerTradePct(sr.max_risk_per_trade_pct)
+          const allocations: Record<string, number> = data.strategy_allocations ?? {}
+          setStrategyAllocation(allocations[strategy] ?? 0)
+          // Sum of all OTHER strategies' allocations
+          const other = Object.entries(allocations)
+            .filter(([k]) => k !== strategy)
+            .reduce((sum, [, v]) => sum + (v ?? 0), 0)
+          setOtherAllocated(other)
         }
       })
       .catch(() => {})
@@ -89,13 +86,9 @@ export function StrategySettingsPanel({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             strategy_risk: {
-              [strategy]: {
-                max_positions: strategyMaxPositions,
-                max_trade_size: maxTradeSize,
-                stop_loss_pct: stopLossPct,
-                target_pct: targetPct === "" ? null : targetPct,
-              },
+              [strategy]: { max_risk_per_trade_pct: maxRiskPerTradePct },
             },
+            strategy_allocations: { [strategy]: strategyAllocation },
           }),
         }),
         new Promise((r) => setTimeout(r, 400)),
@@ -108,7 +101,7 @@ export function StrategySettingsPanel({
     } finally {
       setSavingStrategy(false)
     }
-  }, [strategy, authFetch, strategyMaxPositions, maxTradeSize, stopLossPct, targetPct, onStateRefresh])
+  }, [strategy, authFetch, maxRiskPerTradePct, strategyAllocation, onStateRefresh])
 
   const handleSaveRisk = useCallback(async () => {
     setSavingRisk(true)
@@ -118,11 +111,7 @@ export function StrategySettingsPanel({
         authFetch("/api/settings", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            seed_capital: seedCapital,
-            daily_loss_limit: dailyLossLimit,
-            max_open_positions: maxOpenPositions,
-          }),
+          body: JSON.stringify({ seed_capital: seedCapital }),
         }),
         new Promise((r) => setTimeout(r, 400)),
       ])
@@ -134,7 +123,7 @@ export function StrategySettingsPanel({
     } finally {
       setSavingRisk(false)
     }
-  }, [authFetch, seedCapital, dailyLossLimit, maxOpenPositions, onStateRefresh])
+  }, [authFetch, seedCapital, onStateRefresh])
 
   const handleToggleAutonomous = useCallback(async () => {
     const next = !autonomous
@@ -162,77 +151,66 @@ export function StrategySettingsPanel({
           <div className={SECTION_HEADER_CLASS}>Strategy Risk</div>
           <div className="px-4 py-4 space-y-4">
             <p className="text-xs text-text-muted leading-relaxed">
-              These limits apply to this strategy only. The agent will not exceed them
-              when sizing or managing trades.
+              These limits apply to this strategy only. The agent will not trade until
+              capital is allocated.
             </p>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
+            <div className="space-y-1.5">
+              <div className="flex items-baseline justify-between">
                 <label className="text-xs font-mono text-text-muted block">
-                  Max positions
+                  Capital allocation (₹)
                 </label>
-                <input
-                  type="number"
-                  min={1}
-                  max={5}
-                  value={strategyMaxPositions}
-                  onChange={(e) => setStrategyMaxPositions(Number(e.target.value))}
-                  className={INPUT_CLASS}
-                />
-                <p className="text-[11px] text-text-muted">for this strategy</p>
+                {seedCapital > 0 && (
+                  <span className="text-[11px] text-text-muted font-mono">
+                    {(() => {
+                      const remaining = seedCapital - otherAllocated
+                      return remaining > 0
+                        ? `₹${remaining.toLocaleString("en-IN")} available`
+                        : "fully allocated"
+                    })()}
+                  </span>
+                )}
               </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-mono text-text-muted block">
-                  Max trade size (INR)
-                </label>
-                <input
-                  type="number"
-                  min={1000}
-                  step={1000}
-                  value={maxTradeSize}
-                  onChange={(e) => setMaxTradeSize(Number(e.target.value))}
-                  className={INPUT_CLASS}
-                />
-                <p className="text-[11px] text-text-muted">notional per position</p>
-              </div>
+              <input
+                type="number"
+                min={0}
+                step={1000}
+                value={strategyAllocation || ""}
+                placeholder="0"
+                onChange={(e) => setStrategyAllocation(Number(e.target.value))}
+                className={INPUT_CLASS}
+              />
+              {strategyAllocation === 0 && (
+                <p className="text-[11px] text-accent-amber">
+                  Not set — trades will be blocked until you allocate capital
+                </p>
+              )}
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
+            <div className="space-y-1.5">
+              <div className="flex items-baseline justify-between">
                 <label className="text-xs font-mono text-text-muted block">
-                  Stop loss (%)
+                  Max risk per trade (%)
                 </label>
-                <input
-                  type="number"
-                  min={0.1}
-                  max={10}
-                  step={0.1}
-                  value={stopLossPct}
-                  onChange={(e) => setStopLossPct(Number(e.target.value))}
-                  className={INPUT_CLASS}
-                />
-                <p className="text-[11px] text-text-muted">exit if loss exceeds</p>
+                {strategyAllocation > 0 && maxRiskPerTradePct > 0 && (
+                  <span className="text-[11px] text-text-muted font-mono">
+                    ≤ ₹{Math.round(strategyAllocation * maxRiskPerTradePct / 100).toLocaleString("en-IN")} per trade
+                  </span>
+                )}
               </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-mono text-text-muted block">
-                  Profit target (%) — optional
-                </label>
-                <input
-                  type="number"
-                  min={0.1}
-                  max={20}
-                  step={0.1}
-                  value={targetPct}
-                  placeholder="—"
-                  onChange={(e) =>
-                    setTargetPct(e.target.value === "" ? "" : Number(e.target.value))
-                  }
-                  className={INPUT_CLASS}
-                />
-                <p className="text-[11px] text-text-muted">exit if gain exceeds</p>
-              </div>
+              <input
+                type="number"
+                min={0.5}
+                max={10}
+                step={0.5}
+                value={maxRiskPerTradePct || ""}
+                placeholder="2"
+                onChange={(e) => setMaxRiskPerTradePct(Number(e.target.value))}
+                className={INPUT_CLASS}
+              />
+              <p className="text-[11px] text-text-muted">
+                Max loss if stop is hit, as % of allocation · default 2%
+              </p>
             </div>
 
             <button
@@ -246,65 +224,54 @@ export function StrategySettingsPanel({
         </div>
       )}
 
-      {/* ── Portfolio guardrails ── */}
-      <div className={strategy ? "" : "mt-4"}>
-        <div className={SECTION_HEADER_CLASS}>Portfolio Guardrails</div>
-        <div className="px-4 py-4 space-y-4">
-          <p className="text-xs text-text-muted leading-relaxed">
-            Hard limits that apply across all strategies. The agent cannot exceed these
-            regardless of individual strategy settings.
-          </p>
+      {/* ── Portfolio guardrails — hidden when embedded in strategy page ── */}
+      {!embedded && (
+        <div className={strategy ? "" : "mt-4"}>
+          <div className={SECTION_HEADER_CLASS}>Guardrails</div>
+          <div className="px-4 py-4 space-y-4">
+            <p className="text-xs text-text-muted leading-relaxed">
+              Enforced by code, not AI. Claude cannot change these.
+            </p>
 
-          <div className="space-y-1.5">
-            <label className="text-xs font-mono text-text-muted block">
-              Agent Capital (INR)
-            </label>
-            <input
-              type="number"
-              value={seedCapital}
-              onChange={(e) => setSeedCapital(Number(e.target.value))}
-              className={INPUT_CLASS}
-            />
+            <div className="space-y-1.5">
+              <label className="text-xs font-mono text-text-muted block">
+                Agent Capital (INR)
+              </label>
+              <input
+                type="number"
+                value={seedCapital}
+                onChange={(e) => setSeedCapital(Number(e.target.value))}
+                className={INPUT_CLASS}
+              />
+            </div>
+
+            {/* Static guardrail labels */}
+            <div className="space-y-2 pt-2 border-t border-border">
+              <div className="flex items-center gap-2 text-xs text-text-muted">
+                <span className="text-accent-green">&#10003;</span>
+                <span>Stop loss required on all trades</span>
+                <span className="text-[10px] text-text-muted/60 ml-auto">always active</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-text-muted">
+                <span className="text-accent-green">&#10003;</span>
+                <span>No entries before 9:30 AM IST</span>
+                <span className="text-[10px] text-text-muted/60 ml-auto">always active</span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleSaveRisk}
+              disabled={savingRisk}
+              className="bg-accent-green text-black text-xs font-semibold px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              {savingRisk ? "Saving..." : riskSaved ? "Saved" : "Save"}
+            </button>
           </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-mono text-text-muted block">
-              Daily Loss Limit (INR)
-            </label>
-            <input
-              type="number"
-              value={dailyLossLimit}
-              onChange={(e) => setDailyLossLimit(Number(e.target.value))}
-              className={INPUT_CLASS}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-mono text-text-muted block">
-              Max Open Positions (total)
-            </label>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              value={maxOpenPositions}
-              onChange={(e) => setMaxOpenPositions(Number(e.target.value))}
-              className={INPUT_CLASS}
-            />
-          </div>
-
-          <button
-            onClick={handleSaveRisk}
-            disabled={savingRisk}
-            className="bg-accent-green text-black text-xs font-semibold px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            {savingRisk ? "Saving..." : riskSaved ? "Saved" : "Save"}
-          </button>
         </div>
-      </div>
+      )}
 
-      {/* ── Autonomous Trading ── */}
-      <div>
+      {/* ── Autonomous Trading — hidden when embedded in strategy page ── */}
+      {!embedded && <div>
         <div className={SECTION_HEADER_CLASS}>Autonomous Trading</div>
         <div className="px-4 py-4">
           <div className="flex items-center justify-between mb-2">
@@ -341,7 +308,7 @@ export function StrategySettingsPanel({
             </p>
           )}
         </div>
-      </div>
+      </div>}
     </>
   )
 

@@ -13,6 +13,7 @@ interface ProposalCardProps {
   target_price: number
   quantity: number
   thesis: string
+  tradeRiskLimit?: number
   onApproved: () => void
   onDenied: () => void
 }
@@ -34,6 +35,7 @@ export function ProposalCard({
   target_price,
   quantity,
   thesis,
+  tradeRiskLimit,
   onApproved,
   onDenied,
 }: ProposalCardProps) {
@@ -116,6 +118,21 @@ export function ProposalCard({
         Entry {formatINR(entry_price)} &middot; SL {formatINR(stop_loss_price)} &middot; Target{" "}
         {formatINR(target_price)} &middot; {quantity} shares &middot; {formatINR(totalValue)}
       </div>
+
+      {/* Worst-case loss */}
+      {risk > 0 && (
+        <div className={clsx(
+          "font-mono text-xs mb-3",
+          tradeRiskLimit && (quantity * risk) > tradeRiskLimit * 0.8
+            ? "text-accent-amber"
+            : "text-text-muted"
+        )}>
+          Max loss if stopped: {formatINR(quantity * risk)}
+          {tradeRiskLimit != null && (
+            <span> (of {formatINR(tradeRiskLimit)} limit)</span>
+          )}
+        </div>
+      )}
 
       <div className="border-t border-border my-3" />
 

@@ -157,3 +157,5 @@ def resume_agent(uid: Annotated[str, Depends(get_current_uid)]):
     if is_enabled() and uid != "default":
         update_user(uid, {"paused": False})
     return {"status": "resumed"}
+
+

@@ -5,36 +5,45 @@ _IST = pytz.timezone("Asia/Kolkata")
 
 
 class RiskGuard:
-    MAX_POSITION_PCT = 0.40   # 40% of capital per trade
-    MIN_SL_PCT       = 0.015  # stop loss must be ≥1.5% below entry
-    MAX_SL_PCT       = 0.025  # stop loss must be ≤2.5% below entry
-
-    def __init__(self, seed_capital: float, max_positions: int = 2):
-        self.seed_capital  = seed_capital
-        self.MAX_POSITIONS = max_positions
+    def __init__(
+        self,
+        seed_capital: float,
+        max_risk_per_trade_pct: float = 2.0,  # % of strategy allocation; default 2%
+    ):
+        self.seed_capital           = seed_capital
+        self.max_risk_per_trade_pct = max_risk_per_trade_pct
 
     def validate(
         self,
         entry_price: float,
         quantity: int,
         stop_loss_price: float,
-        open_position_count: int,
         available_funds: float,
+        strategy_allocation: float = 0.0,
     ) -> tuple[bool, str]:
-        position_value = entry_price * quantity
-        sl_pct = (entry_price - stop_loss_price) / entry_price
 
+        # 1. SL required
+        if stop_loss_price <= 0 or stop_loss_price >= entry_price:
+            return False, "Stop loss is required and must be below entry price"
+
+        # 2. Market hours (9:30 AM IST)
         now = datetime.now(_IST)
         market_open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
         if now < market_open_time:
             return False, f"No entries before 9:30 AM IST — first candle not yet closed (now {now.strftime('%H:%M')} IST)"
 
-        if open_position_count >= self.MAX_POSITIONS:
-            return False, f"Already at max {self.MAX_POSITIONS} open positions"
-        if position_value > self.seed_capital * self.MAX_POSITION_PCT:
-            return False, f"Position ₹{position_value:.0f} exceeds 40% cap (₹{self.seed_capital * 0.4:.0f})"
-        if position_value > available_funds:
-            return False, f"Insufficient funds: need ₹{position_value:.0f}, have ₹{available_funds:.0f}"
-        if not (self.MIN_SL_PCT <= sl_pct <= self.MAX_SL_PCT):
-            return False, f"Stop loss {sl_pct*100:.1f}% must be 1.5–2.5% below entry"
+        # 3. Max risk per trade (% of strategy allocation)
+        if strategy_allocation > 0:
+            trade_risk = quantity * (entry_price - stop_loss_price)
+            limit = strategy_allocation * self.max_risk_per_trade_pct / 100
+            if trade_risk > limit:
+                return False, (
+                    f"Trade risk ₹{trade_risk:.0f} exceeds {self.max_risk_per_trade_pct}% of allocation "
+                    f"(₹{limit:.0f})"
+                )
+
+        # 4. Available funds (capped by strategy allocation, not broker balance)
+        if entry_price * quantity > available_funds:
+            return False, f"Insufficient funds: need ₹{entry_price * quantity:.0f}, have ₹{available_funds:.0f}"
+
         return True, "ok"

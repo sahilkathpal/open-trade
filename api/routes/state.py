@@ -115,11 +115,44 @@ def get_state(uid: Annotated[str, Depends(get_current_uid)]):
 
         upcoming_jobs = []
         try:
+            from agent.schedule_manager import _load_schedule
+            schedule_labels: dict[str, str] = {}
+            schedule_last_run: dict[str, str] = {}
+            try:
+                for entry in _load_schedule(uid):
+                    if entry.get("reason"):
+                        schedule_labels[entry["id"]] = entry["reason"]
+                    if entry.get("last_run"):
+                        schedule_last_run[entry["id"]] = entry["last_run"]
+            except Exception:
+                pass
+
+            _builtin_labels = {
+                "heartbeat":        "Heartbeat",
+                "premarket":        "Pre-market screening",
+                "execution":        "Execution planning",
+                "eod":              "EOD report",
+                "clear_proposals":  "Clear proposals",
+            }
+            uid_prefix = f"user:{uid}:schedule:"
+
             for job in sorted(scheduler.get_jobs(), key=lambda j: j.next_run_time or 0):
                 if job.next_run_time:
+                    job_id = job.id
+                    last_run = None
+                    if job_id in _builtin_labels:
+                        label = _builtin_labels[job_id]
+                    elif job_id.startswith(uid_prefix):
+                        entry_id = job_id[len(uid_prefix):]
+                        label = schedule_labels.get(entry_id) or entry_id.replace("-", " ").replace("_", " ").title()
+                        last_run = schedule_last_run.get(entry_id)
+                    else:
+                        label = job_id
                     upcoming_jobs.append({
-                        "id": job.id,
+                        "id":       job_id,
                         "next_run": job.next_run_time.isoformat(),
+                        "label":    label,
+                        "last_run": last_run,
                     })
         except Exception:
             pass
@@ -166,8 +199,11 @@ def get_state(uid: Annotated[str, Depends(get_current_uid)]):
             "token_expired":     token_expired,
             "catchup_available": catchup_available,
             "agent_pnl":         agent_pnl,
-            "daily_loss_limit":  abs(ctx.daily_loss_limit),
-            "seed_capital":      ctx.risk.seed_capital,
+            **((lambda p: {
+                "cumulative_realized":          p.get("cumulative_realized", 0.0),
+                "strategy_cumulative_realized": p.get("strategy_cumulative_realized", {}),
+            })(_load_agent_pnl())),
+            "seed_capital":        ctx.risk.seed_capital,
             "autonomous":        ctx.autonomous,
             "paused":            ctx.paused,
         }

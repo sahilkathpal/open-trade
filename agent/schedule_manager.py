@@ -61,7 +61,7 @@ class ScheduleManager:
     def _make_job_id(self, uid: str, entry_id: str) -> str:
         return f"user:{uid}:schedule:{entry_id}"
 
-    def _make_job_fn(self, uid: str, job_type: str, prompt: str):
+    def _make_job_fn(self, uid: str, entry_id: str, job_type: str, prompt: str):
         """Return an async callable that runs this scheduled job for the given user."""
         async def _job():
             from agent.scheduler import _for_each_user, _send_telegram
@@ -97,6 +97,7 @@ class ScheduleManager:
                     result = await asyncio.to_thread(
                         _run_job_type, job_type, prompt
                     )
+                    await asyncio.to_thread(_record_last_run, uid, entry_id)
                     if _send_telegram and ctx.telegram_chat_id:
                         label = job_type.capitalize()
                         await _send_telegram(
@@ -119,6 +120,7 @@ class ScheduleManager:
                 token = set_user_ctx(ctx)
                 try:
                     result = await asyncio.to_thread(_run_job_type, job_type, prompt)
+                    await asyncio.to_thread(_record_last_run, uid, entry_id)
                     if _send_telegram:
                         await _send_telegram(f"{job_type.capitalize()} complete\n\n{result[:1000]}")
                 except Exception as e:
@@ -144,7 +146,7 @@ class ScheduleManager:
             logger.error("Invalid cron expression '%s' for entry %s", cron, entry["id"])
             return
 
-        job_fn = self._make_job_fn(uid, job_type, prompt)
+        job_fn = self._make_job_fn(uid, entry["id"], job_type, prompt)
         self.scheduler.add_job(
             job_fn, "cron",
             minute=minute, hour=hour, day=dom, month=month, day_of_week=dow,
@@ -176,6 +178,18 @@ class ScheduleManager:
     def list_jobs(self, uid: str) -> list:
         """Return active schedule entries for a user."""
         return _load_schedule(uid)
+
+
+def _record_last_run(uid: str, entry_id: str):
+    """Write last_run timestamp into the matching SCHEDULE.json entry."""
+    from datetime import datetime, timezone
+    entries = _load_schedule(uid)
+    now = datetime.now(timezone.utc).isoformat()
+    for entry in entries:
+        if entry.get("id") == entry_id:
+            entry["last_run"] = now
+            break
+    _save_schedule(uid, entries)
 
 
 def _run_job_type(job_type: str, extra_prompt: str = "") -> str:

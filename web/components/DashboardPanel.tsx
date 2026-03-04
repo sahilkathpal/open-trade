@@ -8,7 +8,6 @@ import { PositionCard } from "@/components/PositionCard"
 import { WatchlistCard } from "@/components/WatchlistCard"
 import { TriggerCard } from "@/components/TriggerCard"
 import { ProposalCard } from "@/components/ProposalCard"
-import { TokenUsageCard } from "@/components/TokenUsageCard"
 import { MISCountdown } from "@/components/MISCountdown"
 import { useAuth } from "@/lib/auth"
 import { AppState } from "@/lib/types"
@@ -30,21 +29,24 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "approvals", label: "Approvals" },
 ]
 
-const JOB_LABELS: Record<string, string> = {
-  premarket: "Pre-market screening",
-  execution: "Execution planning",
-  heartbeat: "Heartbeat (every 1 min)",
-  clear_proposals: "Clear proposals",
-  eod: "EOD report",
-}
-
-function formatNextRun(iso: string): string {
-  return new Date(iso).toLocaleTimeString("en-IN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Kolkata",
-  })
+function formatRelative(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now()
+  if (ms <= 0) return "now"
+  const sec = Math.round(ms / 1000)
+  if (sec < 90) return `in ${sec}s`
+  const min = Math.round(ms / 60000)
+  if (min < 60) return `in ${min}m`
+  const hr = Math.floor(min / 60)
+  const remMin = min % 60
+  const istOpts = { timeZone: "Asia/Kolkata" } as const
+  const todayDate = new Date().toLocaleDateString("en-IN", istOpts)
+  const tDate = new Date(iso).toLocaleDateString("en-IN", istOpts)
+  const timeStr = new Date(iso).toLocaleTimeString("en-IN", { ...istOpts, hour: "2-digit", minute: "2-digit", hour12: false })
+  if (todayDate === tDate) return remMin === 0 ? `in ${hr}h` : `in ${hr}h ${remMin}m`
+  const tomorrowDate = new Date(Date.now() + 86400000).toLocaleDateString("en-IN", istOpts)
+  if (tDate === tomorrowDate) return `tomorrow · ${timeStr}`
+  const dateStr = new Date(iso).toLocaleDateString("en-IN", { ...istOpts, day: "numeric", month: "short" })
+  return `${dateStr} · ${timeStr}`
 }
 
 export function DashboardPanel({
@@ -118,11 +120,10 @@ export function DashboardPanel({
               />
 
               <RiskGauge
-                dayPnl={agentPnl.total}
-                limit={state.daily_loss_limit ?? 1000}
+                seedCapital={state.seed_capital ?? 0}
+                cumulativeRealized={state.cumulative_realized ?? 0}
+                maxDrawdownPct={state.max_drawdown_pct ?? 10}
               />
-
-              <TokenUsageCard usage={state.token_usage} />
 
               {/* Upcoming schedule */}
               <div className="bg-background rounded-lg border border-border p-4">
@@ -153,10 +154,10 @@ export function DashboardPanel({
                         className="flex items-center justify-between text-xs"
                       >
                         <span className="text-text-muted font-mono">
-                          {JOB_LABELS[job.id] ?? job.id}
+                          {(job.label ?? job.id).split(":")[0]}
                         </span>
                         <span className="text-text-primary font-mono">
-                          {formatNextRun(job.next_run)}
+                          {formatRelative(job.next_run)}
                         </span>
                       </div>
                     ))}
@@ -242,6 +243,7 @@ export function DashboardPanel({
                     target_price={proposal.target_price}
                     quantity={proposal.quantity}
                     thesis={proposal.thesis}
+                    maxLossPerTrade={state?.max_loss_per_trade}
                     onApproved={onStateRefresh}
                     onDenied={onStateRefresh}
                   />
