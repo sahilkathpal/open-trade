@@ -16,7 +16,6 @@ import {
 import { useState, useEffect, useCallback } from "react"
 import clsx from "clsx"
 import { useAuth } from "@/lib/auth"
-import { COMING_SOON_STRATEGIES } from "@/lib/types"
 
 interface ThreadMeta {
   id: string
@@ -346,27 +345,11 @@ export function Sidebar() {
           )
         })}
 
-        {/* Coming soon strategies — muted text only */}
-        {COMING_SOON_STRATEGIES.map((s) => (
-          <div
-            key={s.id}
-            className="flex items-center gap-2 px-3 py-2 rounded-md text-sm opacity-30 cursor-not-allowed select-none mt-0.5"
-          >
-            <span className="flex-1 truncate text-[13px] text-text-muted">
-              {s.name}
-            </span>
-          </div>
-        ))}
-
-        {/* New strategy — disabled */}
-        <div className="mt-2 px-3">
-          <div
-            className="flex items-center gap-2 text-[12px] text-text-muted opacity-30 cursor-not-allowed select-none"
-          >
-            <Plus size={12} className="shrink-0" />
-            <span>New strategy</span>
-          </div>
-        </div>
+        {strategies.length === 0 && (
+          <p className="px-3 py-2 text-[12px] text-text-muted opacity-50">
+            Create a new strategy to see it here
+          </p>
+        )}
       </div>
 
       <div className="border-t border-border" />
