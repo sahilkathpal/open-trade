@@ -461,6 +461,20 @@ def place_trade(
     }
     _save_open_positions(open_positions)
 
+    # Push trade confirmation to Telegram
+    try:
+        from agent.telegram import notify_proposal_sync
+        rr = round((target_price - entry_price) / (entry_price - stop_loss_price), 1) if entry_price != stop_loss_price else 0
+        msg = (
+            f"Trade placed: {transaction_type} {symbol}\n"
+            f"Entry ₹{entry_price:.2f} | Qty {quantity}\n"
+            f"SL ₹{stop_loss_price:.2f} | Target ₹{target_price:.2f}\n"
+            f"R:R {rr}:1"
+        )
+        notify_proposal_sync(msg, chat_id=ctx.telegram_chat_id)
+    except Exception:
+        pass
+
     # Record this symbol as agent-tracked for P&L attribution
     try:
         pnl_data = _load_agent_pnl()
@@ -519,6 +533,19 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str, rea
 
         open_positions.pop(symbol, None)
         _save_open_positions(open_positions)
+
+        # Push exit confirmation to Telegram
+        try:
+            from agent.telegram import notify_proposal_sync
+            msg = f"Position exited: {symbol}\nQty {quantity}"
+            if realized_pnl != 0.0:
+                sign = "+" if realized_pnl >= 0 else ""
+                msg += f" | P&L {sign}₹{realized_pnl:.2f}"
+            msg += f"\nReason: {reason}"
+            notify_proposal_sync(msg, chat_id=ctx.telegram_chat_id)
+        except Exception:
+            pass
+
         _append_activity(f"EXIT {symbol} qty={quantity} reason={reason}")
         try:
             from api import activity_log

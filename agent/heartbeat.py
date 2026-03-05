@@ -286,7 +286,7 @@ def _evaluate_triggers(
                                 logger.info("EOD exit %s: %s", sym, result)
                             except Exception as e:
                                 logger.error("Hard trigger %s: exit_position %s failed: %s", tid, sym, e)
-                        alerts.append(f"HARD TRIGGER [{tid}]: exit all positions ({len(tracked_for_exit)} symbols)")
+                        alerts.append(f"Trigger [{tid}] fired: exit_all")
                 else:
                     # action="place_trade" — execute trade directly
                     symbol = trigger.get("symbol", "")
@@ -302,8 +302,7 @@ def _evaluate_triggers(
                             target_price=trigger["target_price"],
                             thesis=trigger["thesis"],
                         )
-                        status = result.get("status", "unknown") if isinstance(result, dict) else str(result)
-                        alerts.append(f"HARD TRIGGER [{tid}] {symbol} @ ₹{ltp:.2f} — {status}")
+                        alerts.append(f"Trigger [{tid}] fired: {symbol} @ ₹{ltp:.2f}")
                         logger.info("Hard trigger trade %s: %s", symbol, result)
                     except Exception as e:
                         logger.error("Hard trigger %s: place_trade failed: %s", tid, e)
@@ -401,14 +400,14 @@ def run() -> str:
             if ltp <= sl:
                 realized = (ltp - entry) * qty  # negative for losses
                 result = exit_position(symbol, sec_id, qty, f"Stop loss hit: LTP ₹{ltp:.2f} ≤ SL ₹{sl:.2f}", realized_pnl=realized)
-                alerts.append(f"SL hit {symbol}: exit @ ₹{ltp:.2f} (SL ₹{sl:.2f})")
+                alerts.append(f"SL hit: {symbol} LTP ₹{ltp:.2f} ≤ SL ₹{sl:.2f}")
                 logger.info("Stop loss exit %s: %s", symbol, result)
                 continue
 
             if target and ltp >= target:
                 realized = (ltp - entry) * qty  # positive
                 result = exit_position(symbol, sec_id, qty, f"Target reached: LTP ₹{ltp:.2f} ≥ target ₹{target:.2f}", realized_pnl=realized)
-                alerts.append(f"Target {symbol}: exit @ ₹{ltp:.2f} (target ₹{target:.2f})")
+                alerts.append(f"Target hit: {symbol} LTP ₹{ltp:.2f} ≥ target ₹{target:.2f}")
                 logger.info("Target exit %s: %s", symbol, result)
                 continue
 
