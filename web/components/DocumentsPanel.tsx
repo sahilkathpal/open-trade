@@ -14,7 +14,7 @@ interface DocumentsPanelProps {
   strategy: string
 }
 
-export function DocumentsPanel({ open, onClose, strategy: _strategy }: DocumentsPanelProps) {
+export function DocumentsPanel({ open, onClose, strategy }: DocumentsPanelProps) {
   const { authFetch } = useAuth()
 
   const [documents, setDocuments] = useState<MemoryFile[]>([])
@@ -88,6 +88,17 @@ export function DocumentsPanel({ open, onClose, strategy: _strategy }: Documents
       })
     : null
 
+  // Filter: strategy-specific files (STRATEGY_*) only show for their strategy.
+  // Shared files (JOURNAL.md, LEARNINGS.md, etc.) show everywhere.
+  const filteredDocuments = documents.filter((doc) => {
+    const upper = doc.filename.toUpperCase()
+    if (upper.startsWith("STRATEGY_")) {
+      if (strategy === "portfolio") return true
+      return upper.startsWith(`STRATEGY_${strategy.toUpperCase()}`)
+    }
+    return true
+  })
+
   const panelTitle = selectedDoc
     ? selectedDoc.filename.replace(".md", "")
     : "Documents"
@@ -102,12 +113,12 @@ export function DocumentsPanel({ open, onClose, strategy: _strategy }: Documents
       {!selectedDoc ? (
         /* Document list */
         <div className="p-4 space-y-3">
-          {documents.length === 0 ? (
+          {filteredDocuments.length === 0 ? (
             <p className="text-text-muted text-sm text-center py-12">
               No documents yet. Claude will create files as it starts working.
             </p>
           ) : (
-            documents.map((doc) => (
+            filteredDocuments.map((doc) => (
               <div
                 key={doc.filename}
                 className="bg-background rounded-lg border border-border p-4 flex items-center justify-between gap-4"

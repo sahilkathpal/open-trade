@@ -12,7 +12,17 @@ router = APIRouter()
 _SHARED = {"SOUL.md", "HEARTBEAT.md"}
 
 # Internal files excluded from the docs listing
-_INTERNAL_MD = {"ACTIVITY.md", "STRATEGY_SUMMARY.md"}
+_INTERNAL_MD = {"ACTIVITY.md"}
+
+def _is_internal(filename: str) -> bool:
+    """Return True for files that should not appear in the Documents tab."""
+    if filename in _INTERNAL_MD:
+        return True
+    # Hide all strategy summary files — they're used by portfolio context, not for reading
+    import re
+    if re.match(r"^STRATEGY_[A-Z0-9]+_SUMMARY\.md$", filename.upper()):
+        return True
+    return False
 
 
 def _user_memory_dir(uid: str) -> Path:
@@ -40,7 +50,7 @@ def list_memory_files(uid: Annotated[str, Depends(get_current_uid)]):
     files = []
     if memory_dir.exists():
         for path in sorted(memory_dir.glob("*.md")):
-            if path.name in _INTERNAL_MD:
+            if _is_internal(path.name):
                 continue
             mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
             files.append({"filename": path.name, "last_modified": mtime})
