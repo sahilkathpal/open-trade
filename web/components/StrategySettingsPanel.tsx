@@ -37,6 +37,7 @@ export function StrategySettingsPanel({
   const [maxRiskPerTradePct, setMaxRiskPerTradePct] = useState<number>(2)
   const [strategyAllocation, setStrategyAllocation] = useState<number>(0)
   const [otherAllocated, setOtherAllocated] = useState<number>(0) // sum of other strategies
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [strategySaved, setStrategySaved] = useState(false)
 
@@ -49,13 +50,18 @@ export function StrategySettingsPanel({
   const [autonomous, setAutonomous] = useState<boolean>(state?.autonomous ?? false)
   const [savingAuto, setSavingAuto] = useState(false)
 
-  // Sync when panel opens (or on mount when embedded)
+  // Sync when panel opens (or on mount when embedded).
+  // `state` is intentionally excluded from deps — including it would re-fetch settings and reset
+  // user edits every time the parent polls for state (every 10s). Settings only load once per open.
+  // `authFetch` is intentionally excluded — it's stable and including it causes spurious re-runs.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!open && !embedded) return
     if (state) {
       setSeedCapital(state.seed_capital ?? 0)
       setAutonomous(state.autonomous ?? false)
     }
+    setSettingsLoaded(false)
     authFetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -71,25 +77,31 @@ export function StrategySettingsPanel({
             .reduce((sum, [, v]) => sum + (v ?? 0), 0)
           setOtherAllocated(other)
         }
+        setSettingsLoaded(true)
       })
       .catch(() => {})
-  }, [open, embedded, state, strategy, authFetch])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, embedded, strategy])
 
   const handleSaveStrategy = useCallback(async () => {
     if (!strategy) return
     setSavingStrategy(true)
     setStrategySaved(false)
     try {
+      // Only include strategy_allocations once settings have been loaded from the API.
+      // Before load, strategyAllocation is 0 (initial state) and saving it would wipe
+      // a previously-configured allocation.
+      const payload: Record<string, unknown> = {
+        strategy_risk: { [strategy]: { max_risk_per_trade_pct: maxRiskPerTradePct } },
+      }
+      if (settingsLoaded) {
+        payload.strategy_allocations = { [strategy]: strategyAllocation }
+      }
       await Promise.all([
         authFetch("/api/settings", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            strategy_risk: {
-              [strategy]: { max_risk_per_trade_pct: maxRiskPerTradePct },
-            },
-            strategy_allocations: { [strategy]: strategyAllocation },
-          }),
+          body: JSON.stringify(payload),
         }),
         new Promise((r) => setTimeout(r, 400)),
       ])
@@ -101,7 +113,7 @@ export function StrategySettingsPanel({
     } finally {
       setSavingStrategy(false)
     }
-  }, [strategy, authFetch, maxRiskPerTradePct, strategyAllocation, onStateRefresh])
+  }, [strategy, authFetch, maxRiskPerTradePct, strategyAllocation, settingsLoaded, onStateRefresh])
 
   const handleSaveRisk = useCallback(async () => {
     setSavingRisk(true)
