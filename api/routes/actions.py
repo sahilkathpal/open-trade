@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 
 from api.auth import get_current_uid
-from agent.tools import get_pending_approvals, save_pending_approvals, place_trade, reset_agent_pnl, _save_triggers
+from agent.tools import get_pending_approvals, save_pending_approvals, place_trade, reset_agent_pnl, _save_triggers, get_approvals, resolve_approval, save_approvals, write_trigger
 from agent.runner import run
 from api import activity_log
 from api.routes.state import _scheduler_status, _set_user_ctx_for_uid
@@ -53,6 +53,17 @@ def approve_trade(
     token, _ctx = _set_user_ctx_for_uid(uid)
     try:
         symbol = symbol.upper()
+        # Try new APPROVALS.json first
+        approvals = get_approvals()
+        approval = next((a for a in approvals if a.get("symbol") == symbol and a.get("type") == "trade"), None)
+        if approval:
+            item = resolve_approval(approval["id"])
+            if item:
+                params = {k: v for k, v in item.items() if k not in ("id", "type", "created_at", "description")}
+                result = place_trade(**params, approved=True)
+                activity_log.emit({"type": "trade", "symbol": symbol, "summary": f"Trade approved: {symbol}"})
+                return result
+        # Fallback: old PENDING.json
         pending = get_pending_approvals()
         if symbol not in pending:
             raise HTTPException(status_code=404, detail=f"No pending approval for {symbol}")
@@ -74,12 +85,75 @@ def deny_trade(
     token, _ctx = _set_user_ctx_for_uid(uid)
     try:
         symbol = symbol.upper()
+        # Try new APPROVALS.json first
+        approvals = get_approvals()
+        approval = next((a for a in approvals if a.get("symbol") == symbol and a.get("type") == "trade"), None)
+        if approval:
+            resolve_approval(approval["id"])
+            activity_log.emit({"type": "trade", "symbol": symbol, "summary": f"Trade denied: {symbol}"})
+            return {"status": "denied", "symbol": symbol}
+        # Fallback: old PENDING.json
         pending = get_pending_approvals()
         if pending.pop(symbol, None) is None:
             raise HTTPException(status_code=404, detail=f"No pending approval for {symbol}")
         save_pending_approvals(pending)
         activity_log.emit({"type": "trade", "symbol": symbol, "summary": f"Trade denied: {symbol}"})
         return {"status": "denied", "symbol": symbol}
+    finally:
+        reset_user_ctx(token)
+
+
+@router.get("/api/approvals")
+def list_approvals(uid: Annotated[str, Depends(get_current_uid)]):
+    """List all non-expired approvals."""
+    from agent.user_context import reset_user_ctx
+    token, _ctx = _set_user_ctx_for_uid(uid)
+    try:
+        return get_approvals()
+    finally:
+        reset_user_ctx(token)
+
+
+class RespondIn(BaseModel):
+    approved: bool
+
+
+@router.post("/api/approvals/{approval_id}/respond")
+def respond_approval(
+    approval_id: str,
+    body: RespondIn,
+    uid: Annotated[str, Depends(get_current_uid)],
+):
+    """Approve or deny an approval by id."""
+    from agent.user_context import reset_user_ctx
+    token, _ctx = _set_user_ctx_for_uid(uid)
+    try:
+        item = resolve_approval(approval_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Approval {approval_id} not found or expired")
+
+        if not body.approved:
+            activity_log.emit({"type": "trade", "symbol": item.get("symbol", ""), "summary": f"Denied: {item.get('description', approval_id)}"})
+            return {"status": "denied", "id": approval_id}
+
+        # Execute based on type
+        item_type = item.get("type")
+        if item_type == "trade":
+            # Remove meta fields before calling place_trade
+            params = {k: v for k, v in item.items() if k not in ("id", "type", "created_at", "description")}
+            result = place_trade(**params, approved=True)
+            activity_log.emit({"type": "trade", "symbol": item.get("symbol", ""), "summary": f"Approved: {item.get('description', approval_id)}"})
+            return result
+        elif item_type == "hard_trigger":
+            # Reconstruct write_trigger call
+            excluded = {"id", "type", "created_at", "description", "trigger_id"}
+            params = {k: v for k, v in item.items() if k not in excluded}
+            trigger_id = item.get("trigger_id", approval_id)
+            result = write_trigger(id=trigger_id, approved=True, **params)
+            activity_log.emit({"type": "tool_call", "tool": "write_trigger", "summary": f"Hard trigger approved: {trigger_id}"})
+            return result
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown approval type: {item_type}")
     finally:
         reset_user_ctx(token)
 
@@ -123,6 +197,7 @@ def trigger_job(
         try:
             # Catchup starts a fresh session — clear stale data from previous day
             save_pending_approvals({})
+            save_approvals([])
             _save_triggers([])
             reset_agent_pnl()
             run(job_type)

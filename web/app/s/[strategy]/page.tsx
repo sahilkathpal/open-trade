@@ -21,7 +21,6 @@ import {
 } from "lucide-react"
 import { useAuth } from "@/lib/auth"
 import { AppState, StrategyConfig, STRATEGY_CONFIGS } from "@/lib/types"
-import { ProposalCard } from "@/components/ProposalCard"
 import { PositionCard } from "@/components/PositionCard"
 import { TriggerCard } from "@/components/TriggerCard"
 import { MISCountdown } from "@/components/MISCountdown"
@@ -651,23 +650,6 @@ function TradesContent({
           <div className="text-[11px] text-text-muted font-mono mt-1">
             since strategy started
           </div>
-        </div>
-      )}
-
-      {Object.keys(state.pending_approvals).length > 0 && (
-        <div className="space-y-2">
-          <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider">
-            Pending Approvals
-          </h2>
-          {Object.entries(state.pending_approvals).map(([symbol, params]) => (
-            <ProposalCard
-              key={symbol}
-              {...params}
-              tradeRiskLimit={strategyAllocation && maxRiskPct ? strategyAllocation * maxRiskPct / 100 : undefined}
-              onApproved={fetchState}
-              onDenied={fetchState}
-            />
-          ))}
         </div>
       )}
 

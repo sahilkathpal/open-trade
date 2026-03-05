@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from api.auth import get_current_uid
-from agent.tools import get_funds, get_positions, get_pending_approvals, load_triggers, _load_agent_pnl
+from agent.tools import get_funds, get_positions, get_pending_approvals, load_triggers, _load_agent_pnl, get_approvals
 from agent.heartbeat import load_tracked_positions
 from agent.scheduler import _is_market_open, scheduler
 from api.token_usage import get_today as get_today_usage, get_all as get_all_usage
@@ -189,7 +189,8 @@ def get_state(uid: Annotated[str, Depends(get_current_uid)]):
         return {
             "capital":           capital,
             "positions":         positions,
-            "pending_approvals": get_pending_approvals(),
+            "pending_approvals": {},  # deprecated, use approvals
+            "approvals": get_approvals(),
             "triggers":          load_triggers(),
             "market_open":       _is_market_open(),
             "scheduler_status":  _scheduler_status,

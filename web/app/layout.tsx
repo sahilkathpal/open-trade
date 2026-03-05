@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation"
 import "./globals.css"
 import { AuthProvider, useAuth } from "@/lib/auth"
 import { Sidebar } from "@/components/Sidebar"
+import { ApprovalToastContainer } from "@/components/Toast"
 import { auth } from "@/lib/firebase"
 import { useEffect, useState, useCallback } from "react"
 
@@ -96,6 +97,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
+      <ApprovalToastContainer />
     </div>
   )
 }

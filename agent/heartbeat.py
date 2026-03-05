@@ -301,6 +301,9 @@ def _evaluate_triggers(
                             stop_loss_price=trigger["stop_loss_price"],
                             target_price=trigger["target_price"],
                             thesis=trigger["thesis"],
+                            approved=True,
+                            expires_at="",
+                            strategy_id=trigger.get("strategy_id", ""),
                         )
                         alerts.append(f"Trigger [{tid}] fired: {symbol} @ ₹{ltp:.2f}")
                         logger.info("Hard trigger trade %s: %s", symbol, result)

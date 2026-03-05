@@ -54,6 +54,30 @@ export interface AppState {
     buffer_pct?: number
     above_pct?: number
   }>
+  approvals: Approval[]
+}
+
+export interface Approval {
+  id: string
+  type: "trade" | "hard_trigger"
+  created_at: string
+  expires_at: string
+  strategy_id: string
+  description: string
+  // trade fields
+  symbol?: string
+  transaction_type?: string
+  quantity?: number
+  entry_price?: number
+  stop_loss_price?: number
+  target_price?: number
+  thesis?: string
+  product_type?: string
+  // hard_trigger fields
+  trigger_id?: string
+  trigger_type?: string
+  action?: string
+  reason?: string
 }
 
 export interface StrategyConfig {

@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid as _uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -77,6 +78,82 @@ def save_pending_approvals(data: dict):
     path = _pending_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2))
+
+
+# ── unified approvals store (APPROVALS.json, per-user) ────────────────────────
+
+def _approvals_path() -> Path:
+    return get_user_ctx().memory_dir / "APPROVALS.json"
+
+
+def get_approvals() -> list[dict]:
+    """Load all non-expired approvals from APPROVALS.json."""
+    path = _approvals_path()
+    if not path.exists():
+        return []
+    try:
+        items = json.loads(path.read_text())
+        if not isinstance(items, list):
+            return []
+        now = datetime.now(_IST)
+        active = []
+        for item in items:
+            exp_str = item.get("expires_at", "")
+            if exp_str:
+                try:
+                    exp = datetime.fromisoformat(exp_str)
+                    if exp.tzinfo is None:
+                        exp = _IST.localize(exp)
+                    if now > exp:
+                        logger.debug("Approval %s expired — discarding", item.get("id"))
+                        continue
+                except Exception:
+                    pass
+            active.append(item)
+        return active
+    except Exception:
+        return []
+
+
+def save_approvals(items: list[dict]):
+    path = _approvals_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(items, indent=2, default=str))
+
+
+def queue_approval(
+    type: str,
+    payload: dict,
+    expires_at: str,
+    strategy_id: str,
+    description: str,
+) -> str:
+    """Queue an approval item. Returns the new item's id."""
+    item_id = str(_uuid.uuid4())
+    item = {
+        "id": item_id,
+        "type": type,
+        "created_at": datetime.now(_IST).isoformat(),
+        "expires_at": expires_at,
+        "strategy_id": strategy_id,
+        "description": description,
+        **payload,
+    }
+    items = get_approvals()
+    items.append(item)
+    save_approvals(items)
+    return item_id
+
+
+def resolve_approval(id: str) -> dict | None:
+    """Pop and return an approval item by id, or None if not found."""
+    items = get_approvals()
+    for i, item in enumerate(items):
+        if item.get("id") == id:
+            items.pop(i)
+            save_approvals(items)
+            return item
+    return None
 
 
 # ── open positions helpers ─────────────────────────────────────────────────────
@@ -371,14 +448,12 @@ def place_trade(
 
     # 2. Check approval requirement
     if not approved and not ctx.autonomous:
-        proposal = _fmt_proposal(symbol, quantity, entry_price, stop_loss_price,
-                                  target_price or entry_price * 1.04, thesis)
-        # Expiry: Claude-provided value, or default to 15:00 IST same day
-        today = datetime.now(_IST)
-        default_expiry = today.replace(hour=15, minute=0, second=0, microsecond=0).isoformat()
-        expiry = expires_at if expires_at else default_expiry
-        pending = get_pending_approvals()
-        pending[symbol] = {
+        if not expires_at:
+            return {"status": "error", "reason": "expires_at required — set the time after which this proposal should lapse (e.g. '2026-03-05T15:00:00+05:30')"}
+
+        description = f"{transaction_type} {symbol} @ ₹{entry_price:.2f} | SL ₹{stop_loss_price:.2f} | Target ₹{target_price:.2f}"
+        rr = round((target_price - entry_price) / (entry_price - stop_loss_price), 1) if entry_price != stop_loss_price else 0
+        payload = {
             "symbol": symbol,
             "security_id": security_id,
             "transaction_type": transaction_type,
@@ -387,22 +462,35 @@ def place_trade(
             "stop_loss_price": stop_loss_price,
             "thesis": thesis,
             "target_price": target_price,
-            "expires_at": expiry,
+            "expires_at": expires_at,
+            "strategy_id": strategy_id,
+            "product_type": product_type,
         }
-        save_pending_approvals(pending)
+        approval_id = queue_approval(
+            type="trade",
+            payload=payload,
+            expires_at=expires_at,
+            strategy_id=strategy_id,
+            description=description,
+        )
         _append_activity(
             f"TRADE QUEUED {transaction_type} {symbol} qty={quantity} "
-            f"entry=₹{entry_price:.2f} sl=₹{stop_loss_price:.2f} (pending approval)"
+            f"entry=₹{entry_price:.2f} sl=₹{stop_loss_price:.2f} (pending approval id={approval_id})"
         )
         try:
+            from api import activity_log
+            activity_log.emit({"type": "approval_queued", "id": approval_id, "description": description, "summary": f"Approval needed: {symbol}"})
+        except Exception:
+            pass
+        try:
             from agent.telegram import notify_proposal_sync
-            rr = round((target_price - entry_price) / (entry_price - stop_loss_price), 1) if entry_price != stop_loss_price else 0
             msg = (
                 f"New proposal: {transaction_type} {symbol}\n\n"
                 f"Entry  ₹{entry_price:.2f} | Qty {quantity}\n"
                 f"SL     ₹{stop_loss_price:.2f}\n"
                 f"Target ₹{target_price:.2f} | R:R {rr}:1\n\n"
                 f"{thesis[:300]}\n\n"
+                f"Approval ID: {approval_id}\n"
                 f"Reply: approve {symbol}  or  deny {symbol}"
             )
             notify_proposal_sync(msg, chat_id=ctx.telegram_chat_id)
@@ -410,7 +498,7 @@ def place_trade(
             pass
         return {
             "status": "pending_approval",
-            "proposal": proposal,
+            "id": approval_id,
         }
 
     # 3. Emit to activity feed
@@ -592,6 +680,7 @@ def write_trigger(
     thesis: str = None,
     rsi_max: float = None,
     candle_close_above: float = None,
+    approved: bool = False,
 ) -> dict:
     """
     Set a monitoring trigger. The heartbeat evaluates all triggers every 5 minutes.
@@ -641,6 +730,63 @@ def write_trigger(
                 return {"error": f"Time trigger '{at}' is already in the past (now {_now.strftime('%H:%M')} IST). Set a future time or use a different trigger type."}
         except ValueError:
             return {"error": f"Invalid time format '{at}'. Use HH:MM (24-hour IST)."}
+
+    # Gate hard triggers behind approval when not autonomous
+    if mode == "hard" and not approved and not get_user_ctx().autonomous:
+        ctx = get_user_ctx()
+        if not expires_at:
+            return {"status": "error", "reason": "expires_at required for hard trigger approval"}
+        description = f"Hard trigger: {type} mode={mode} action={action}" + (f" symbol={symbol}" if symbol else "")
+        payload = {k: v for k, v in {
+            "trigger_id": id,
+            "type": type,
+            "mode": mode,
+            "action": action,
+            "reason": reason,
+            "expires_at": expires_at,
+            "symbol": symbol,
+            "threshold": threshold,
+            "at": at,
+            "buffer_pct": buffer_pct,
+            "above_pct": above_pct,
+            "security_id": security_id,
+            "transaction_type": transaction_type,
+            "entry_min": entry_min,
+            "entry_max": entry_max,
+            "stop_loss_price": stop_loss_price,
+            "target_price": target_price,
+            "quantity": quantity,
+            "thesis": thesis,
+            "rsi_max": rsi_max,
+            "candle_close_above": candle_close_above,
+        }.items() if v is not None}
+        approval_id = queue_approval(
+            type="hard_trigger",
+            payload=payload,
+            expires_at=expires_at,
+            strategy_id="",
+            description=description,
+        )
+        _append_activity(f"TRIGGER QUEUED id={id} mode=hard (pending approval approval_id={approval_id})")
+        try:
+            from api import activity_log
+            activity_log.emit({"type": "approval_queued", "id": approval_id, "description": description, "summary": f"Approval needed: hard trigger {id}"})
+        except Exception:
+            pass
+        try:
+            from agent.telegram import notify_proposal_sync
+            msg = (
+                f"Hard trigger needs approval:\n"
+                f"Trigger ID: {id}\n"
+                f"Type: {type} | Action: {action}\n"
+                f"Reason: {reason}\n"
+                f"Approval ID: {approval_id}\n"
+                f"Expires: {expires_at}"
+            )
+            notify_proposal_sync(msg, chat_id=ctx.telegram_chat_id)
+        except Exception:
+            pass
+        return {"status": "pending_approval", "id": approval_id}
 
     triggers = load_triggers()
     triggers = [t for t in triggers if t.get("id") != id]

@@ -33,8 +33,7 @@ def _needs_permission(tool_name: str, inputs: dict) -> bool:
             return True
     if tool_name == "write_schedule":
         return True
-    if tool_name == "write_trigger" and inputs.get("mode") == "hard":
-        return True
+    # write_trigger(hard) gate now lives inside write_trigger() itself
     return False
 
 # ── Prompts for system-level job types ────────────────────────────────────────

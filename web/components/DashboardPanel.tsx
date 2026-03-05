@@ -5,7 +5,6 @@ import { SlidePanel } from "@/components/SlidePanel"
 import { CapitalPanel } from "@/components/CapitalPanel"
 import { PositionCard } from "@/components/PositionCard"
 import { TriggerCard } from "@/components/TriggerCard"
-import { ProposalCard } from "@/components/ProposalCard"
 import { MISCountdown } from "@/components/MISCountdown"
 import { useAuth } from "@/lib/auth"
 import { AppState } from "@/lib/types"
@@ -17,14 +16,13 @@ interface DashboardPanelProps {
   onStateRefresh: () => void
 }
 
-type Tab = "overview" | "positions" | "watchlist" | "triggers" | "approvals"
+type Tab = "overview" | "positions" | "watchlist" | "triggers"
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "positions", label: "Positions" },
   { id: "watchlist", label: "Watchlist" },
   { id: "triggers", label: "Triggers" },
-  { id: "approvals", label: "Approvals" },
 ]
 
 function formatRelative(iso: string): string {
@@ -63,8 +61,6 @@ export function DashboardPanel({
     0
   )
 
-  const approvalEntries = Object.entries(state?.pending_approvals ?? {})
-
   async function handlePauseResume() {
     if (!state) return
     setPauseLoading(true)
@@ -95,11 +91,6 @@ export function DashboardPanel({
               }`}
             >
               {tab.label}
-              {tab.id === "approvals" && approvalEntries.length > 0 && (
-                <span className="ml-1.5 bg-accent-amber text-black rounded-full px-1.5 py-0.5 text-[10px] font-semibold">
-                  {approvalEntries.length}
-                </span>
-              )}
             </button>
           ))}
         </div>
@@ -208,32 +199,6 @@ export function DashboardPanel({
             </>
           )}
 
-          {/* Approvals */}
-          {activeTab === "approvals" && (
-            <>
-              {approvalEntries.length === 0 ? (
-                <p className="text-text-muted text-sm text-center py-12">
-                  No pending approvals
-                </p>
-              ) : (
-                approvalEntries.map(([, proposal]) => (
-                  <ProposalCard
-                    key={proposal.symbol}
-                    symbol={proposal.symbol}
-                    transaction_type={proposal.transaction_type}
-                    entry_price={proposal.entry_price}
-                    stop_loss_price={proposal.stop_loss_price}
-                    target_price={proposal.target_price}
-                    quantity={proposal.quantity}
-                    thesis={proposal.thesis}
-                    tradeRiskLimit={undefined}
-                    onApproved={onStateRefresh}
-                    onDenied={onStateRefresh}
-                  />
-                ))
-              )}
-            </>
-          )}
         </div>
       </SlidePanel>
 

@@ -12,6 +12,7 @@ import {
   MessageSquare,
   Pause,
   Play,
+  Bell,
 } from "lucide-react"
 import { useState, useEffect, useCallback } from "react"
 import clsx from "clsx"
@@ -52,6 +53,7 @@ export function Sidebar() {
   const isPortfolioActive = pathname === "/"
   const isPortfolioThread = isPortfolioActive && !!currentThreadId
   const isSettingsActive = pathname?.startsWith("/settings")
+  const isApprovalsActive = pathname?.startsWith("/approvals")
   const activeStrategyId = pathname?.startsWith("/s/") ? pathname.split("/")[2] : null
   const activeThreadId = activeStrategyId ? currentThreadId : null
   const activePortfolioThreadId = isPortfolioThread ? currentThreadId : null
@@ -70,6 +72,9 @@ export function Sidebar() {
   // Pause state
   const [paused, setPaused] = useState(false)
   const [pauseLoading, setPauseLoading] = useState(false)
+
+  // Approval count
+  const [approvalCount, setApprovalCount] = useState(0)
 
   // Auto-expand portfolio section when on a portfolio thread
   useEffect(() => {
@@ -165,6 +170,22 @@ export function Sidebar() {
     const interval = setInterval(fetchPauseState, 15000)
     return () => clearInterval(interval)
   }, [fetchPauseState])
+
+  // Fetch approval count
+  const fetchApprovalCount = useCallback(async () => {
+    try {
+      const res = await authFetch("/api/approvals")
+      if (!res.ok) return
+      const data = await res.json()
+      setApprovalCount(Array.isArray(data) ? data.length : 0)
+    } catch { /* silent */ }
+  }, [authFetch])
+
+  useEffect(() => {
+    fetchApprovalCount()
+    const interval = setInterval(fetchApprovalCount, 15000)
+    return () => clearInterval(interval)
+  }, [fetchApprovalCount])
 
   const handlePauseResume = useCallback(async () => {
     setPauseLoading(true)
@@ -371,6 +392,29 @@ export function Sidebar() {
             {pauseLoading ? "..." : paused ? "PAUSED" : "Pause agent"}
           </span>
         </button>
+      </div>
+
+      <div className="border-t border-border" />
+
+      {/* Approvals */}
+      <div className="px-2 py-2">
+        <Link
+          href="/approvals"
+          className={clsx(
+            "flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors",
+            isApprovalsActive
+              ? "bg-background text-text-primary"
+              : "text-text-muted hover:text-text-primary hover:bg-background/50"
+          )}
+        >
+          <Bell size={15} />
+          <span>Approvals</span>
+          {approvalCount > 0 && (
+            <span className="ml-auto bg-accent-amber text-black text-[10px] font-semibold rounded-full px-1.5 py-0.5">
+              {approvalCount}
+            </span>
+          )}
+        </Link>
       </div>
 
       <div className="border-t border-border" />
