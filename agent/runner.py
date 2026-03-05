@@ -21,10 +21,16 @@ client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 MODEL = "claude-sonnet-4-6"
 
 
+import re as _re
+
 def _needs_permission(tool_name: str, inputs: dict) -> bool:
     """Return True if this tool call requires user approval before execution."""
-    if tool_name == "write_memory" and inputs.get("filename") == "STRATEGY.md":
-        return True
+    if tool_name == "write_memory":
+        # Gate any STRATEGY_{ID}.md file (the rules doc — two segments: STRATEGY + ID only).
+        # e.g. STRATEGY_INTRADAY.md, STRATEGY_DEFENCE.md — but NOT STRATEGY_INTRADAY_LEARNINGS.md
+        filename = inputs.get("filename", "")
+        if _re.match(r"^STRATEGY_[A-Z0-9]+\.md$", filename):
+            return True
     if tool_name == "write_schedule":
         return True
     if tool_name == "write_trigger" and inputs.get("mode") == "hard":
@@ -41,7 +47,7 @@ PROMPTS = {
 The specific condition and your original note are below (appended after this prompt).
 
 Review the situation with fresh data and make a decision. Steps:
-1. Read STRATEGY.md to recall your rules and current positions context.
+1. Call read_memory() to load your strategy rules document (e.g. STRATEGY_INTRADAY.md).
 2. Call get_market_quote() for any symbols in the trigger.
 3. Call get_positions() and get_funds() to confirm current exposure and P&L.
 4. Call get_historical_data() if candle structure or indicators are relevant.
@@ -60,7 +66,7 @@ Constraints:
 Your scheduled jobs did not run for this account today. Do a combined screening and
 execution pass using the intraday data already available.
 
-1. Read STRATEGY.md to recall your current strategy, rules, and recent learnings.
+1. Call read_memory() to load your strategy rules document (e.g. STRATEGY_INTRADAY.md).
 2. Fetch markets and economy news (categories: markets, economy). Assess today's macro sentiment.
 3. Screen for candidates using your strategy's criteria. Multiple candles have already printed —
    use them to confirm or invalidate any thesis.
@@ -116,7 +122,7 @@ def _summarise_tool_result(tool: str, inputs: dict, result) -> str:
     return str(result)[:60] if result else ""
 
 
-def run(job_type: str, extra_prompt: str = "") -> str:
+def run(job_type: str, extra_prompt: str = "", strategy_id: str = "") -> str:
     """
     Run the agent for a given job type.
 
@@ -133,7 +139,7 @@ def run(job_type: str, extra_prompt: str = "") -> str:
 
     activity_log.emit({"type": "job_start", "summary": f"{job_type} started"})
 
-    # Build system prompt from SOUL.md + STRATEGY.md
+    # Build system prompt from SOUL.md + STRATEGY_{ID}.md (if strategy_id known)
     # SOUL.md is shared; per-user files live in get_user_ctx().memory_dir
     soul_path = Path("memory/SOUL.md")
     soul = soul_path.read_text() if soul_path.exists() else "You are an autonomous trading agent."
@@ -141,12 +147,13 @@ def run(job_type: str, extra_prompt: str = "") -> str:
     from agent.user_context import get_user_ctx
     mem = get_user_ctx().memory_dir
 
-    # All job types load STRATEGY.md as baseline context.
+    # Load strategy-specific doc. Each strategy has its own STRATEGY_{ID}.md.
     # Claude calls read_memory() for any additional files it needs.
     memory_parts = []
-    strategy_path = mem / "STRATEGY.md"
-    if strategy_path.exists():
-        memory_parts.append(f"## STRATEGY.md\n\n{strategy_path.read_text()}")
+    if strategy_id:
+        specific_path = mem / f"STRATEGY_{strategy_id.upper()}.md"
+        if specific_path.exists():
+            memory_parts.append(f"## STRATEGY_{strategy_id.upper()}.md\n\n{specific_path.read_text()}")
 
     memory_context = "\n\n---\n\n".join(memory_parts)
     system = f"{soul}\n\n---\n\n{memory_context}" if memory_context else soul
@@ -252,10 +259,10 @@ The user is talking to you through the open-trade web app. Here's what exists:
 - Chat — this conversation
 - Trades — live position table (entry, quantity, stop loss, P&L)
 - Agent — activity feed of recent tool calls and job runs; token usage chart
-- Documents — MARKET.md, STRATEGY.md, JOURNAL.md displayed read-only
+- Documents — strategy memory files displayed read-only
 
 **Sidebar**
-- Strategy list (currently: Intraday only)
+- Strategy list (all registered strategies appear here)
 - Thread list per strategy — each chat session is a separate thread
 - "New chat" button creates a fresh thread
 
@@ -285,11 +292,11 @@ The user is talking to you through the open-trade web app. Here's what exists:
 
 **What Claude can do from this chat**
 - Answer questions about positions, P&L, market data, fundamentals
-- Read and update memory files (STRATEGY.md, JOURNAL.md, LEARNINGS.md, and any strategy-specific files) via read_memory/write_memory tools
+- Read and update memory files (STRATEGY_{ID}.md, JOURNAL.md, LEARNINGS.md, and any other strategy-specific files) via read_memory/write_memory tools
 - Place trades, exit positions (subject to RiskGuard limits and autonomous mode)
 - Run screens, fetch news, get quotes on any NSE EQ symbol
 - Create and manage recurring scheduled jobs (write_schedule, remove_schedule, list_schedules)
-- On first use: establish the user's trading strategy, write STRATEGY.md (must specify order type —
+- On first use: establish the user's trading strategy, write STRATEGY_{ID}.md (must specify order type —
   MIS/INTRA for intraday/same-day exits, CNC for overnight or multi-day positions — plus entry
   criteria, position sizing approach, volatility response, and concentration rules), then set up
   a schedule with Claude-authored prompts for each job (premarket screening, execution, EOD review)

@@ -61,7 +61,7 @@ class ScheduleManager:
     def _make_job_id(self, uid: str, entry_id: str) -> str:
         return f"user:{uid}:schedule:{entry_id}"
 
-    def _make_job_fn(self, uid: str, entry_id: str, job_type: str, prompt: str):
+    def _make_job_fn(self, uid: str, entry_id: str, job_type: str, prompt: str, strategy_id: str = ""):
         """Return an async callable that runs this scheduled job for the given user."""
         async def _job():
             from agent.scheduler import _for_each_user, _send_telegram
@@ -95,7 +95,7 @@ class ScheduleManager:
                 token = set_user_ctx(ctx)
                 try:
                     result = await asyncio.to_thread(
-                        _run_job_type, job_type, prompt
+                        _run_job_type, job_type, prompt, strategy_id
                     )
                     await asyncio.to_thread(_record_last_run, uid, entry_id)
                     if _send_telegram and ctx.telegram_chat_id:
@@ -119,7 +119,7 @@ class ScheduleManager:
                 ctx = _get_default_ctx()
                 token = set_user_ctx(ctx)
                 try:
-                    result = await asyncio.to_thread(_run_job_type, job_type, prompt)
+                    result = await asyncio.to_thread(_run_job_type, job_type, prompt, strategy_id)
                     await asyncio.to_thread(_record_last_run, uid, entry_id)
                     if _send_telegram:
                         await _send_telegram(f"{job_type.capitalize()} complete\n\n{result[:1000]}")
@@ -139,6 +139,22 @@ class ScheduleManager:
         job_type  = entry.get("job_type", "custom")
         prompt    = entry.get("prompt", "")
 
+        # Determine which strategy's doc to load.
+        # Prefer explicit strategy_id; fall back to inferring from entry ID prefix
+        # (e.g. "defence-premarket" → "defence") validated against STRATEGIES.json.
+        strategy_id = entry.get("strategy_id", "")
+        if not strategy_id:
+            entry_id_prefix = entry.get("id", "").split("-")[0]
+            strategies_path = Path("memory") / uid / "STRATEGIES.json"
+            if strategies_path.exists():
+                try:
+                    import json as _json
+                    registered = _json.loads(strategies_path.read_text())
+                    if any(s.get("id") == entry_id_prefix for s in registered):
+                        strategy_id = entry_id_prefix
+                except Exception:
+                    pass
+
         # Parse cron: standard 5-field "minute hour dom month dow"
         try:
             minute, hour, dom, month, dow = cron.strip().split()
@@ -146,7 +162,7 @@ class ScheduleManager:
             logger.error("Invalid cron expression '%s' for entry %s", cron, entry["id"])
             return
 
-        job_fn = self._make_job_fn(uid, entry["id"], job_type, prompt)
+        job_fn = self._make_job_fn(uid, entry["id"], job_type, prompt, strategy_id)
         self.scheduler.add_job(
             job_fn, "cron",
             minute=minute, hour=hour, day=dom, month=month, day_of_week=dow,
@@ -192,17 +208,18 @@ def _record_last_run(uid: str, entry_id: str):
     _save_schedule(uid, entries)
 
 
-def _run_job_type(job_type: str, extra_prompt: str = "") -> str:
+def _run_job_type(job_type: str, extra_prompt: str = "", strategy_id: str = "") -> str:
     """Run agent for a given job_type. Called from thread pool.
     All user-defined scheduled jobs are job_type='custom' with a Claude-authored prompt."""
     from agent.runner import run
     from agent.tools import _append_activity
-    _append_activity(f"SCHEDULE START job={job_type}")
+    label = f"{job_type}:{strategy_id}" if strategy_id else job_type
+    _append_activity(f"SCHEDULE START job={label}")
     try:
-        result = run(job_type, extra_prompt=extra_prompt)
+        result = run(job_type, extra_prompt=extra_prompt, strategy_id=strategy_id)
         summary = result[:120].replace("\n", " ") if result else "no output"
-        _append_activity(f"SCHEDULE DONE job={job_type} result={summary}")
+        _append_activity(f"SCHEDULE DONE job={label} result={summary}")
         return result
     except Exception as e:
-        _append_activity(f"SCHEDULE FAILED job={job_type} error={e}")
+        _append_activity(f"SCHEDULE FAILED job={label} error={e}")
         raise

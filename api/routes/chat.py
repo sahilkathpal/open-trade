@@ -197,6 +197,24 @@ def _build_portfolio_context() -> str:
     try:
         ctx = get_user_ctx()
 
+        # ── Registered strategies ─────────────────────────────────────────
+        strategies_path = ctx.memory_dir / "STRATEGIES.json"
+        strategy_ids: list[str] = []
+        if strategies_path.exists():
+            try:
+                registered = _json.loads(strategies_path.read_text())
+                if isinstance(registered, list) and registered:
+                    strategy_ids = [s.get("id", "") for s in registered if s.get("id")]
+                    strat_parts = []
+                    for s in registered:
+                        sid = s.get("id", "")
+                        name = s.get("name", sid)
+                        status = s.get("status", "active")
+                        strat_parts.append(f"- {sid} ({name}) — {status}")
+                    lines.append("\n## Registered Strategies\n" + "\n".join(strat_parts))
+            except Exception:
+                pass
+
         # ── Capital allocation ────────────────────────────────────────────
         total = ctx.risk.seed_capital
         allocations = ctx.strategy_allocations
@@ -208,28 +226,34 @@ def _build_portfolio_context() -> str:
         else:
             lines.append(f"\n## Capital Allocation\nTotal: ₹{total:,.0f} · No per-strategy allocations set yet")
 
-        # ── Strategy summary ─────────────────────────────────────────────
-        summary_path = ctx.memory_dir / "STRATEGY_SUMMARY.md"
-        if summary_path.exists():
-            content = summary_path.read_text().strip()
-            if content:
-                lines.append(f"\n## Active Strategy Summary\n{content}")
-            else:
-                lines.append("\n## Active Strategy Summary\nNo strategy configured yet — this is a good place to start.")
+        # ── Per-strategy summaries ────────────────────────────────────────
+        # Each strategy has STRATEGY_{ID}_SUMMARY.md — no generic fallback.
+        summary_parts = []
+        for sid in strategy_ids:
+            path = ctx.memory_dir / f"STRATEGY_{sid.upper()}_SUMMARY.md"
+            if path.exists():
+                content = path.read_text().strip()
+                if content:
+                    summary_parts.append(f"### {sid}\n{content}")
+
+        if summary_parts:
+            lines.append("\n## Strategy Summaries\n" + "\n\n".join(summary_parts))
         else:
-            lines.append("\n## Active Strategy Summary\nNo strategy configured yet — this is a good place to start.")
+            lines.append("\n## Strategy Summaries\nNo strategy summaries written yet.")
 
         # ── Active schedules ─────────────────────────────────────────────
         schedule_path = ctx.memory_dir / "SCHEDULE.json"
         if schedule_path.exists():
             try:
                 schedules = _json.loads(schedule_path.read_text())
-                if schedules:
+                # SCHEDULE.json is a list of entries
+                if isinstance(schedules, list) and schedules:
                     sched_lines = []
-                    for job_id, job in schedules.items():
-                        cron = job.get("cron", "?")
-                        sched_lines.append(f"- {job_id}: {cron}")
-                    lines.append(f"\n## Active Schedules\n" + "\n".join(sched_lines))
+                    for entry in schedules:
+                        eid = entry.get("id", "?")
+                        cron = entry.get("cron", "?")
+                        sched_lines.append(f"- {eid}: {cron}")
+                    lines.append("\n## Active Schedules\n" + "\n".join(sched_lines))
             except Exception:
                 pass
 

@@ -306,9 +306,12 @@ def place_trade(
     target_price: float = 0.0,
     approved: bool = False,
     expires_at: str = "",
-    strategy_id: str = "intraday",
+    strategy_id: str = "",
     product_type: str = "INTRA",
 ) -> dict:
+    if not strategy_id:
+        return {"status": "rejected", "reason": "strategy_id is required — specify which strategy this trade belongs to (e.g. 'intraday', 'defence')"}
+
     ctx = get_user_ctx()
 
     # 0. Reject stale approvals
@@ -456,7 +459,7 @@ def place_trade(
         "target_price":    target_price,
         "quantity":        quantity,
         "sl_order_id":     sl_order_id,
-        "product_type":    guard.product_type,
+        "product_type":    product_type,
         "strategy_id":     strategy_id,
     }
     _save_open_positions(open_positions)
@@ -699,9 +702,9 @@ def list_triggers() -> list:
 def write_schedule(
     id: str,
     cron: str,
-    job_type: str,
     reason: str,
     prompt: str = "",
+    strategy_id: str = "",
 ) -> dict:
     """
     Create or update a recurring scheduled job. Stored in memory/{uid}/SCHEDULE.json
@@ -715,20 +718,19 @@ def write_schedule(
     if len(cron.strip().split()) != 5:
         return {"error": f"Invalid cron expression '{cron}'. Must be 5 fields: minute hour dom month dow"}
 
-    if job_type != "custom":
-        return {"error": "job_type must be 'custom'. All scheduled jobs use Claude-authored prompts."}
-
     if not prompt:
         return {"error": "prompt is required. Write the full instruction for what Claude should do when this job fires."}
 
     entry = {
         "id": id,
         "cron": cron,
-        "job_type": job_type,
+        "job_type": "custom",
         "reason": reason,
         "prompt": prompt,
         "created_at": datetime.now(_IST).isoformat(),
     }
+    if strategy_id:
+        entry["strategy_id"] = strategy_id
 
     entries = _load_schedule(uid)
     entries = [e for e in entries if e.get("id") != id]
@@ -739,7 +741,7 @@ def write_schedule(
     if mgr:
         mgr.add_job(uid, entry)
 
-    return {"status": "ok", "schedule_id": id, "cron": cron, "job_type": job_type}
+    return {"status": "ok", "schedule_id": id, "cron": cron}
 
 
 def remove_schedule(id: str) -> dict:
@@ -1031,10 +1033,10 @@ ALL_TOOL_SCHEMAS = [
                 "target_price":     {"type": "number", "description": "Estimated target price for R:R calculation"},
                 "approved":         {"type": "boolean", "default": False},
                 "expires_at":       {"type": "string", "description": "ISO 8601 datetime when this proposal expires. Defaults to 15:00 IST today for intraday MIS trades. Set later for CNC/delivery trades or when the entry window extends beyond 3 PM."},
-                "strategy_id":      {"type": "string", "description": "Strategy identifier (e.g. 'intraday', 'swing'). Defaults to 'intraday'. Used to select per-strategy risk guardrails and product type.", "default": "intraday"},
+                "strategy_id":      {"type": "string", "description": "Required. Strategy identifier this trade belongs to (e.g. 'intraday', 'defence'). Used to select per-strategy risk guardrails and capital allocation."},
             },
             "required": ["symbol", "security_id", "transaction_type", "quantity",
-                         "entry_price", "stop_loss_price", "thesis"],
+                         "entry_price", "stop_loss_price", "thesis", "strategy_id"],
         },
     },
     {
@@ -1058,15 +1060,16 @@ ALL_TOOL_SCHEMAS = [
             "Read a per-user memory file. Any .md filename is allowed. "
             "SOUL.md and HEARTBEAT.md are shared system files (read-only, served from project root). "
             "All other .md files are read from the per-user memory directory. "
-            "Universal files: STRATEGY.md, JOURNAL.md, LEARNINGS.md. "
-            "Strategy-specific files (e.g. HOLDINGS.md, MARKET.md, THESIS.md) are created by Claude as needed."
+            "Strategy files follow the convention STRATEGY_{ID}.md, STRATEGY_{ID}_SUMMARY.md, "
+            "STRATEGY_{ID}_LEARNINGS.md, STRATEGY_{ID}_MARKET.md. "
+            "Shared files: JOURNAL.md, LEARNINGS.md."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "filename": {
                     "type": "string",
-                    "description": "Any .md filename (e.g. STRATEGY.md, JOURNAL.md, HOLDINGS.md). Must end in .md.",
+                    "description": "Any .md filename (e.g. STRATEGY_INTRADAY.md, JOURNAL.md). Must end in .md.",
                 }
             },
             "required": ["filename"],
@@ -1077,8 +1080,12 @@ ALL_TOOL_SCHEMAS = [
         "description": (
             "Write or overwrite a per-user memory file. Any .md filename is allowed except "
             "SOUL.md and HEARTBEAT.md (shared read-only system files). "
-            "Universal files: STRATEGY.md, JOURNAL.md, LEARNINGS.md. "
-            "Strategy-specific files (e.g. HOLDINGS.md, MARKET.md, THESIS.md) can be created freely."
+            "Naming convention for strategy files (create what makes sense):\n"
+            "  STRATEGY_{ID}.md            — strategy rules/criteria (requires user approval)\n"
+            "  STRATEGY_{ID}_SUMMARY.md    — 3-5 line condensed version\n"
+            "  STRATEGY_{ID}_LEARNINGS.md  — per-session observations, freely writable\n"
+            "  STRATEGY_{ID}_MARKET.md     — daily macro/watchlist notes, freely writable\n"
+            "Shared files: JOURNAL.md (all trades), LEARNINGS.md (cross-strategy meta-patterns)."
         ),
         "input_schema": {
             "type": "object",
@@ -1192,9 +1199,10 @@ ALL_TOOL_SCHEMAS = [
         "description": (
             "Create or update a recurring scheduled job. The job is stored in SCHEDULE.json "
             "and registered in APScheduler immediately — it will fire on every matching cron slot.\n\n"
-            "All scheduled jobs are job_type='custom'. You write the prompt — it becomes your "
-            "full instruction when the job fires. STRATEGY.md is always loaded into context "
-            "automatically; call read_memory() inside the job for any other files you need.\n\n"
+            "You write the prompt — it becomes your full instruction when the job fires. "
+            "strategy_id is required: it determines which STRATEGY_{ID}.md is auto-loaded into "
+            "context when the job fires (e.g. strategy_id='defence' loads STRATEGY_DEFENCE.md). "
+            "Call read_memory() inside the job prompt for any other files you need.\n\n"
             "Write prompts as if instructing yourself: what to read, what to analyse, what actions "
             "to take. Be specific — a vague prompt produces vague results.\n\n"
             "Always propose the schedule to the user in chat and wait for agreement before calling "
@@ -1203,13 +1211,13 @@ ALL_TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "id":       {"type": "string", "description": "Unique identifier for this schedule entry, e.g. 'premarket-daily'"},
-                "cron":     {"type": "string", "description": "5-field cron: 'minute hour dom month dow', e.g. '45 8 * * 1-5'"},
-                "job_type": {"type": "string", "enum": ["custom"], "description": "Always 'custom'."},
-                "reason":   {"type": "string", "description": "One-line description of why this job exists"},
-                "prompt":   {"type": "string", "description": "Required. The full instruction for what to do when this job fires."},
+                "id":          {"type": "string", "description": "Unique identifier for this schedule entry, e.g. 'defence-premarket'"},
+                "cron":        {"type": "string", "description": "5-field cron: 'minute hour dom month dow', e.g. '45 8 * * 1-5'"},
+                "reason":      {"type": "string", "description": "One-line description of why this job exists"},
+                "prompt":      {"type": "string", "description": "Required. The full instruction for what to do when this job fires."},
+                "strategy_id": {"type": "string", "description": "Required. Strategy this job belongs to (e.g. 'defence', 'intraday'). Determines which STRATEGY_{ID}.md is auto-loaded into context."},
             },
-            "required": ["id", "cron", "job_type", "reason", "prompt"],
+            "required": ["id", "cron", "reason", "prompt", "strategy_id"],
         },
     },
     {
@@ -1230,7 +1238,7 @@ ALL_TOOL_SCHEMAS = [
         "name": "register_strategy",
         "description": (
             "Register or update a strategy in the user's strategy registry (STRATEGIES.json). "
-            "Call this when setting up a new strategy — after writing STRATEGY.md and before creating the schedule. "
+            "Call this when setting up a new strategy — before creating the schedule. "
             "The registry is what makes the strategy appear in the portfolio UI, sidebar, and settings."
         ),
         "input_schema": {
