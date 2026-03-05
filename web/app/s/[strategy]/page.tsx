@@ -845,8 +845,6 @@ function AgentContent({
 // ── Documents panel content ────────────────────────────────────────────────────
 
 const FILE_TITLES: Record<string, string> = {
-  "STRATEGY.md":  "Strategy Playbook",
-  "MARKET.md":    "Daily Market Brief",
   "JOURNAL.md":   "Trade Journal",
   "LEARNINGS.md": "Learnings",
   "ACTIVITY.md":  "Activity Log",
@@ -860,8 +858,10 @@ function fileTitle(filename: string): string {
 
 function DocumentsContent({
   authFetch,
+  strategyId,
 }: {
   authFetch: ReturnType<typeof useAuth>["authFetch"]
+  strategyId: string
 }) {
   const [files, setFiles] = useState<{ filename: string; last_modified: string }[]>([])
   const [filesLoading, setFilesLoading] = useState(true)
@@ -941,7 +941,14 @@ function DocumentsContent({
         </p>
       ) : (
         <div className="space-y-2">
-          {files.map((f) => (
+          {files.filter((f) => {
+            const upper = f.filename.toUpperCase()
+            if (upper.startsWith("STRATEGY_")) {
+              if (strategyId === "portfolio") return true
+              return upper.startsWith(`STRATEGY_${strategyId.toUpperCase()}`)
+            }
+            return true
+          }).map((f) => (
             <button
               key={f.filename}
               onClick={() => setSelected(f.filename)}
@@ -1299,7 +1306,7 @@ export default function StrategyPage() {
                 <AgentContent state={state} fetchState={fetchState} authFetch={authFetch} />
               )}
               {panelSection === "documents" && (
-                <DocumentsContent authFetch={authFetch} />
+                <DocumentsContent authFetch={authFetch} strategyId={strategyId} />
               )}
               {panelSection === "guardrails" && (
                 <StrategySettingsPanel
