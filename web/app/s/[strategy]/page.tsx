@@ -1,7 +1,6 @@
 "use client"
 
 import { useEffect, useState, useCallback, useRef } from "react"
-import Link from "next/link"
 import { useParams, useRouter, useSearchParams } from "next/navigation"
 import {
   BarChart2,
@@ -18,9 +17,14 @@ import {
   X,
   Pause,
   Play,
+  BookOpen,
+  GitBranch,
+  MoreHorizontal,
+  Tag,
+  Clock,
 } from "lucide-react"
 import { useAuth } from "@/lib/auth"
-import { AppState, StrategyConfig, STRATEGY_CONFIGS } from "@/lib/types"
+import { AppState, StrategyConfig, StrategyProposalItem } from "@/lib/types"
 import { PositionCard } from "@/components/PositionCard"
 import { TriggerCard } from "@/components/TriggerCard"
 import { MISCountdown } from "@/components/MISCountdown"
@@ -28,8 +32,9 @@ import { ActivityFeed } from "@/components/ActivityFeed"
 import { MarkdownRenderer } from "@/components/MarkdownRenderer"
 import { StrategySettingsPanel } from "@/components/StrategySettingsPanel"
 import { PermissionCard, PermissionRequestItem } from "@/components/PermissionCard"
+import { StrategyProposalCard, useStrategyProposalResponder } from "@/components/StrategyProposalCard"
 
-type PanelSection = "trades" | "agent" | "documents" | "guardrails"
+type PanelSection = "trades" | "learnings" | "versions" | "agent" | "documents" | "guardrails"
 
 function formatINR(n: number): string {
   const abs = Math.abs(n)
@@ -53,6 +58,7 @@ interface ChatMessage {
   content: string
   toolCalls?: ToolCallItem[]
   permissionRequest?: PermissionRequestItem
+  strategyProposal?: StrategyProposalItem
 }
 
 function getWsBase(): string {
@@ -125,15 +131,22 @@ function ChatArea({
   authFetch,
   strategyId,
   threadId,
+  strategies,
+  prefilledInput,
+  onPrefilledConsumed,
 }: {
   config: StrategyConfig
   state: AppState | null
   authFetch: ReturnType<typeof useAuth>["authFetch"]
   strategyId: string
   threadId: string | null
+  strategies: { id: string; name: string }[]
+  prefilledInput?: string
+  onPrefilledConsumed?: () => void
 }) {
   const router = useRouter()
   const { user } = useAuth()
+  const respondToStrategyProposal = useStrategyProposalResponder(authFetch)
 
   const todayPnl = state?.agent_pnl?.total ?? 0
   const positionCount = state?.positions?.length ?? 0
@@ -157,6 +170,19 @@ function ChatArea({
   const userRef = useRef(user)
   const genRef = useRef(0)
   const streamingRef = useRef<{ content: string; toolCalls: ToolCallItem[] } | null>(null)
+
+  // @mention autocomplete
+  const [mentionQuery, setMentionQuery] = useState("")
+  const [mentionVisible, setMentionVisible] = useState(false)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  // Apply prefilled input in splash mode
+  useEffect(() => {
+    if (prefilledInput && !threadId) {
+      setChatInput(prefilledInput)
+      onPrefilledConsumed?.()
+    }
+  }, [prefilledInput, threadId, onPrefilledConsumed])
 
   // Keep userRef current without rebuilding connect on every auth re-render
   useEffect(() => { userRef.current = user }, [user])
@@ -286,7 +312,7 @@ function ChatArea({
           }
           streamingRef.current = updated
           setStreaming(updated)
-        } else if (event.type === "permission_request") {
+        } else if (event.type === "permission_request" || event.type === "strategy_proposal") {
           // Flush any accumulated streaming content as a message first
           const current = streamingRef.current
           if (current && (current.content || current.toolCalls.length > 0)) {
@@ -298,19 +324,35 @@ function ChatArea({
           }
           streamingRef.current = { content: "", toolCalls: [] }
           setStreaming(null)
-          // Add permission request as an inline message item
-          const permMsg: ChatMessage = {
-            id: `perm-${event.id}`,
-            role: "assistant",
-            content: "",
-            permissionRequest: {
-              id: event.id,
-              tool: event.tool,
-              inputs: event.inputs,
-              status: "pending",
-            },
+          if (event.type === "strategy_proposal") {
+            // Inline strategy proposal card
+            const proposalMsg: ChatMessage = {
+              id: `proposal-${event.id}`,
+              role: "assistant",
+              content: "",
+              strategyProposal: {
+                id: event.id,
+                tool: event.tool,
+                inputs: event.inputs,
+                status: "pending",
+              },
+            }
+            setMessages((msgs) => [...msgs, proposalMsg])
+          } else {
+            // Add permission request as an inline message item
+            const permMsg: ChatMessage = {
+              id: `perm-${event.id}`,
+              role: "assistant",
+              content: "",
+              permissionRequest: {
+                id: event.id,
+                tool: event.tool,
+                inputs: event.inputs,
+                status: "pending",
+              },
+            }
+            setMessages((msgs) => [...msgs, permMsg])
           }
-          setMessages((msgs) => [...msgs, permMsg])
         } else if (event.type === "done") {
           // Read from ref — always has the latest tokens (direct write, no render lag).
           // Never call setMessages inside a setStreaming updater — React Strict Mode
@@ -393,6 +435,33 @@ function ChatArea({
     // Resume streaming state since the agent will continue
     setStreaming({ content: "", toolCalls: [] })
   }, [])
+
+  // Respond to a strategy proposal (API call, not WS)
+  const handleStrategyProposalRespond = useCallback(async (proposalId: string, approved: boolean) => {
+    const ok = await respondToStrategyProposal(proposalId, approved)
+    if (ok) {
+      setMessages((msgs) =>
+        msgs.map((m) =>
+          m.strategyProposal?.id === proposalId
+            ? {
+                ...m,
+                strategyProposal: {
+                  ...m.strategyProposal!,
+                  status: approved ? "accepted" as const : "rejected" as const,
+                },
+              }
+            : m
+        )
+      )
+      // Send the decision back to the WS so the agent can continue
+      wsRef.current?.send(JSON.stringify({
+        type: "permission_response",
+        id: proposalId,
+        approved,
+      }))
+      setStreaming({ content: "", toolCalls: [] })
+    }
+  }, [respondToStrategyProposal])
 
   // ── SPLASH MODE ────────────────────────────────────────────────────────────
   if (!threadId) {
@@ -492,7 +561,13 @@ function ChatArea({
 
         <div className="max-w-2xl mx-auto space-y-5">
           {messages.map((msg) =>
-            msg.permissionRequest ? (
+            msg.strategyProposal ? (
+              <StrategyProposalCard
+                key={msg.id}
+                proposal={msg.strategyProposal}
+                onRespond={handleStrategyProposalRespond}
+              />
+            ) : msg.permissionRequest ? (
               <PermissionCard
                 key={msg.id}
                 request={msg.permissionRequest}
@@ -518,15 +593,31 @@ function ChatArea({
       </div>
 
       {/* Input */}
-      <div className="px-6 pb-6 shrink-0">
+      <div className="px-6 pb-6 shrink-0 relative">
         <form
           onSubmit={(e) => { e.preventDefault(); sendMessage() }}
           className="max-w-2xl mx-auto bg-surface rounded-2xl border border-border overflow-hidden"
         >
           <input
+            ref={inputRef}
             type="text"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              const val = e.target.value
+              setInput(val)
+              // @mention detection
+              const cursor = e.target.selectionStart ?? val.length
+              const before = val.slice(0, cursor)
+              const match = before.match(/@([\w-]*)$/)
+              if (match) {
+                setMentionQuery(match[1].toLowerCase())
+                setMentionVisible(true)
+              } else {
+                setMentionVisible(false)
+              }
+            }}
+            onKeyDown={(e) => { if (e.key === "Escape") setMentionVisible(false) }}
+            onBlur={() => setTimeout(() => setMentionVisible(false), 150)}
             placeholder={
               isThinking
                 ? "Claude is thinking..."
@@ -548,6 +639,36 @@ function ChatArea({
             </button>
           </div>
         </form>
+        {/* @mention dropdown */}
+        {mentionVisible && strategies.length > 0 && (() => {
+          const filtered = strategies.filter(s =>
+            s.id.toLowerCase().includes(mentionQuery) || s.name.toLowerCase().includes(mentionQuery)
+          )
+          if (!filtered.length) return null
+          return (
+            <div className="absolute bottom-full left-6 right-6 mb-1 bg-surface border border-border rounded-xl shadow-lg overflow-hidden z-50 max-h-48 overflow-y-auto">
+              {filtered.map(s => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => {
+                    const cursor = inputRef.current?.selectionStart ?? input.length
+                    const before = input.slice(0, cursor)
+                    const after = input.slice(cursor)
+                    const withoutAt = before.replace(/@[\w-]*$/, "")
+                    setInput(withoutAt + "@" + s.id + " " + after)
+                    setMentionVisible(false)
+                    setTimeout(() => inputRef.current?.focus(), 0)
+                  }}
+                  className="w-full text-left px-4 py-2.5 hover:bg-background/50 transition-colors flex items-center gap-3"
+                >
+                  <span className="text-accent-green text-sm font-mono">@{s.id}</span>
+                  <span className="text-xs text-text-muted">{s.name}</span>
+                </button>
+              ))}
+            </div>
+          )
+        })()}
       </div>
     </div>
   )
@@ -562,6 +683,7 @@ function TradesContent({
   strategyAllocation,
   maxRiskPct,
   onOpenGuardrails,
+  authFetch,
 }: {
   state: AppState | null
   fetchState: () => void
@@ -569,7 +691,29 @@ function TradesContent({
   strategyAllocation?: number
   maxRiskPct: number
   onOpenGuardrails: () => void
+  authFetch: ReturnType<typeof useAuth>["authFetch"]
 }) {
+  const [trades, setTrades] = useState<{
+    trade_id?: string
+    symbol: string
+    entry_price: number
+    exit_price: number
+    quantity: number
+    realized_pnl: number
+    exited_at?: string
+    placed_at?: string
+    product_type?: string
+  }[]>([])
+  const [tradesLoading, setTradesLoading] = useState(true)
+
+  useEffect(() => {
+    authFetch(`/api/strategies/${strategyId}/trades`)
+      .then(r => r.json())
+      .then(data => setTrades(Array.isArray(data) ? data : []))
+      .catch(() => setTrades([]))
+      .finally(() => setTradesLoading(false))
+  }, [strategyId, authFetch])
+
   if (!state) {
     return (
       <div className="flex items-center justify-center py-12 text-text-muted text-sm">
@@ -664,6 +808,47 @@ function TradesContent({
         ) : (
           <div className="space-y-2">
             {state.positions.map((p) => <PositionCard key={p.symbol} position={p} />)}
+          </div>
+        )}
+      </div>
+
+      {/* Trades journal */}
+      <div>
+        <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-2">
+          Trade History {!tradesLoading && trades.length > 0 && `(${trades.length})`}
+        </h2>
+        {tradesLoading ? (
+          <div className="bg-surface rounded-lg border border-border p-4 text-center text-text-muted text-sm">Loading...</div>
+        ) : trades.length === 0 ? (
+          <div className="bg-surface rounded-lg border border-border p-4 text-center text-text-muted text-sm">
+            No completed trades yet
+          </div>
+        ) : (
+          <div className="bg-surface rounded-lg border border-border overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="px-3 py-2 text-left font-mono text-text-muted font-normal">Symbol</th>
+                  <th className="px-3 py-2 text-right font-mono text-text-muted font-normal">Entry</th>
+                  <th className="px-3 py-2 text-right font-mono text-text-muted font-normal">Exit</th>
+                  <th className="px-3 py-2 text-right font-mono text-text-muted font-normal">P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trades.map((t, i) => (
+                  <tr key={t.trade_id ?? i} className="border-b border-border/50 last:border-0">
+                    <td className="px-3 py-2 font-mono text-text-primary">{t.symbol}</td>
+                    <td className="px-3 py-2 text-right font-mono text-text-muted">₹{t.entry_price?.toFixed(0)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-text-muted">
+                      {t.exit_price ? `₹${t.exit_price.toFixed(0)}` : "—"}
+                    </td>
+                    <td className={["px-3 py-2 text-right font-mono", (t.realized_pnl ?? 0) >= 0 ? "text-accent-green" : "text-accent-red"].join(" ")}>
+                      {(t.realized_pnl ?? 0) >= 0 ? "+" : ""}{formatINR(t.realized_pnl ?? 0)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
@@ -824,6 +1009,193 @@ function AgentContent({
   )
 }
 
+// ── Learnings panel content ────────────────────────────────────────────────────
+
+function LearningsContent({
+  strategyDoc,
+}: {
+  strategyDoc: { learnings?: string } | null
+}) {
+  if (!strategyDoc) {
+    return (
+      <div className="flex items-center justify-center py-12 text-text-muted text-sm">
+        Loading...
+      </div>
+    )
+  }
+  const learnings = strategyDoc.learnings?.trim()
+  return (
+    <div className="px-4 py-4">
+      {learnings ? (
+        <MarkdownRenderer content={learnings} />
+      ) : (
+        <div className="text-center py-12">
+          <BookOpen size={24} className="text-text-muted mx-auto mb-3" />
+          <p className="text-text-muted text-sm">No learnings yet</p>
+          <p className="text-text-muted text-xs mt-1 max-w-xs mx-auto leading-relaxed">
+            Claude writes these after reviewing trades in EOD jobs.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Versions panel content ─────────────────────────────────────────────────────
+
+interface VersionItem {
+  version_id: string
+  thesis: string
+  rules: string
+  label: string | null
+  created_at: string
+  change: string
+}
+
+function VersionsContent({
+  strategyId,
+  authFetch,
+}: {
+  strategyId: string
+  authFetch: ReturnType<typeof useAuth>["authFetch"]
+}) {
+  const [versions, setVersions] = useState<VersionItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [editingLabel, setEditingLabel] = useState<string | null>(null)
+  const [labelInput, setLabelInput] = useState("")
+
+  useEffect(() => {
+    authFetch(`/api/strategies/${strategyId}/versions`)
+      .then(r => r.json())
+      .then(data => setVersions(Array.isArray(data) ? data : []))
+      .catch(() => setVersions([]))
+      .finally(() => setLoading(false))
+  }, [strategyId, authFetch])
+
+  const saveLabel = useCallback(async (versionId: string) => {
+    try {
+      await authFetch(`/api/strategies/${strategyId}/versions/${versionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: labelInput }),
+      })
+      setVersions(vs => vs.map(v => v.version_id === versionId ? { ...v, label: labelInput } : v))
+      setEditingLabel(null)
+      setLabelInput("")
+    } catch { /* silent */ }
+  }, [authFetch, strategyId, labelInput])
+
+  function fmtDate(iso: string) {
+    return new Date(iso).toLocaleDateString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day: "numeric", month: "short", year: "numeric",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    })
+  }
+
+  if (loading) {
+    return <div className="flex items-center justify-center py-12 text-text-muted text-sm">Loading...</div>
+  }
+
+  if (versions.length === 0) {
+    return (
+      <div className="px-4 py-4 text-center">
+        <GitBranch size={24} className="text-text-muted mx-auto mb-3" />
+        <p className="text-text-muted text-sm">No version history yet</p>
+        <p className="text-text-muted text-xs mt-1 leading-relaxed">
+          Versions are saved automatically when thesis or rules are updated.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="px-4 py-4 space-y-2">
+      {versions.map(v => (
+        <div key={v.version_id} className="bg-surface rounded-lg border border-border overflow-hidden">
+          <div
+            className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-background/30 transition-colors"
+            onClick={() => setExpanded(expanded === v.version_id ? null : v.version_id)}
+          >
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-0.5">
+                <span className={[
+                  "text-[10px] font-mono px-1.5 py-0.5 rounded border",
+                  v.change === "thesis" ? "text-accent-green border-accent-green/30 bg-accent-green/10"
+                  : v.change === "rules" ? "text-accent-amber border-accent-amber/30 bg-accent-amber/10"
+                  : "text-text-muted border-border",
+                ].join(" ")}>
+                  {v.change}
+                </span>
+                {v.label && (
+                  <span className="text-[11px] text-text-muted font-mono truncate">{v.label}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1 text-[11px] text-text-muted">
+                <Clock size={10} />
+                <span>{fmtDate(v.created_at)}</span>
+              </div>
+            </div>
+            <ChevronLeft
+              size={13}
+              className={["text-text-muted transition-transform", expanded === v.version_id ? "-rotate-90" : "rotate-180"].join(" ")}
+            />
+          </div>
+
+          {expanded === v.version_id && (
+            <div className="border-t border-border px-4 py-3 space-y-3">
+              {v.thesis && (
+                <div>
+                  <p className="text-[10px] font-mono text-text-muted uppercase tracking-wider mb-1">Thesis</p>
+                  <pre className="text-[12px] text-text-primary leading-relaxed whitespace-pre-wrap font-sans">{v.thesis}</pre>
+                </div>
+              )}
+              {v.rules && (
+                <div>
+                  <p className="text-[10px] font-mono text-text-muted uppercase tracking-wider mb-1">Rules</p>
+                  <pre className="text-[12px] text-text-primary leading-relaxed whitespace-pre-wrap font-sans">{v.rules}</pre>
+                </div>
+              )}
+              <div className="pt-1">
+                {editingLabel === v.version_id ? (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={labelInput}
+                      onChange={e => setLabelInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") saveLabel(v.version_id); if (e.key === "Escape") setEditingLabel(null) }}
+                      placeholder="e.g. v1.0 - original"
+                      className="flex-1 bg-background border border-border rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-border/80"
+                      autoFocus
+                    />
+                    <button
+                      onClick={() => saveLabel(v.version_id)}
+                      className="text-xs text-accent-green hover:opacity-80"
+                    >Save</button>
+                    <button
+                      onClick={() => setEditingLabel(null)}
+                      className="text-xs text-text-muted hover:text-text-primary"
+                    >Cancel</button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => { setEditingLabel(v.version_id); setLabelInput(v.label ?? "") }}
+                    className="flex items-center gap-1.5 text-[11px] text-text-muted hover:text-text-primary transition-colors"
+                  >
+                    <Tag size={11} />
+                    {v.label ? "Edit label" : "Add label"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── Documents panel content ────────────────────────────────────────────────────
 
 const FILE_TITLES: Record<string, string> = {
@@ -955,6 +1327,8 @@ function DocumentsContent({
 
 const PANEL_TABS: { id: PanelSection; label: string; icon: React.ElementType }[] = [
   { id: "trades",     label: "Trades",     icon: BarChart2   },
+  { id: "learnings",  label: "Learnings",  icon: BookOpen    },
+  { id: "versions",   label: "Versions",   icon: GitBranch   },
   { id: "agent",      label: "Agent",      icon: Bot         },
   { id: "documents",  label: "Docs",       icon: FileText    },
   { id: "guardrails", label: "Guardrails", icon: ShieldCheck },
@@ -969,13 +1343,17 @@ const GENERIC_CONFIG: Omit<StrategyConfig, "id" | "name"> = {
 export default function StrategyPage() {
   const params = useParams()
   const searchParams = useSearchParams()
+  const router = useRouter()
   const strategyId = params.strategy as string
   const threadId = searchParams.get("t")
   const [registryName, setRegistryName] = useState<string | null>(null)
   const [strategyPaused, setStrategyPaused] = useState(false)
+  const [strategies, setStrategies] = useState<{id: string; name: string}[]>([])
+  const [strategyDoc, setStrategyDoc] = useState<{learnings?: string; autonomy?: string; thesis?: string; rules?: string} | null>(null)
+  const [archiveMenuOpen, setArchiveMenuOpen] = useState(false)
+  const [prefilledChat, setPrefilledChat] = useState("")
 
-  const hardcodedConfig = STRATEGY_CONFIGS[strategyId]
-  const config: StrategyConfig = hardcodedConfig ?? {
+  const config: StrategyConfig = {
     id: strategyId,
     name: registryName ?? strategyId,
     ...GENERIC_CONFIG,
@@ -1013,9 +1391,10 @@ export default function StrategyPage() {
     authFetch("/api/strategies")
       .then((r) => r.ok ? r.json() : [])
       .then((list: {id: string; name: string; status: string}[]) => {
+        setStrategies(list)
         const entry = list.find((s) => s.id === strategyId)
         if (entry) {
-          if (!hardcodedConfig) setRegistryName(entry.name)
+          setRegistryName(entry.name)
           setStrategyPaused(entry.status === "paused")
         }
       })
@@ -1048,12 +1427,21 @@ export default function StrategyPage() {
     }
   }, [authFetch, strategyId])
 
+  const fetchStrategyDoc = useCallback(async () => {
+    try {
+      const res = await authFetch(`/api/strategies/${strategyId}`)
+      if (!res.ok) return
+      setStrategyDoc(await res.json())
+    } catch { /* silent */ }
+  }, [authFetch, strategyId])
+
   useEffect(() => {
     fetchState()
     fetchStrategySettings()
+    fetchStrategyDoc()
     const interval = setInterval(fetchState, 10000)
     return () => clearInterval(interval)
-  }, [fetchState, fetchStrategySettings])
+  }, [fetchState, fetchStrategySettings, fetchStrategyDoc])
 
   const togglePanel = useCallback((section: PanelSection) => {
     if (panelOpen && panelSection === section) {
@@ -1087,25 +1475,6 @@ export default function StrategyPage() {
 
   // Risk color for Guardrails button — amber when strategy has no allocation set
   const riskLevel = strategyAllocation === 0 ? "caution" : "safe"
-
-  if (!config) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center">
-          <p className="text-text-primary text-sm mb-1">Strategy not found</p>
-          <p className="text-text-muted text-xs">
-            No strategy with id &quot;{strategyId}&quot; exists.
-          </p>
-          <Link
-            href="/"
-            className="mt-4 inline-block text-xs text-accent-green hover:underline"
-          >
-            Go to Portfolio
-          </Link>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div className="flex flex-col h-full">
@@ -1222,6 +1591,30 @@ export default function StrategyPage() {
             </button>
           )
         })}
+        {/* Archive menu */}
+        <div className="relative ml-1">
+          <button
+            onClick={() => setArchiveMenuOpen(v => !v)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-text-muted hover:text-text-primary hover:bg-surface/60 transition-colors"
+            title="More options"
+          >
+            <MoreHorizontal size={13} />
+          </button>
+          {archiveMenuOpen && (
+            <div className="absolute right-0 top-full mt-1 bg-surface border border-border rounded-xl shadow-lg z-50 py-1 w-44">
+              <button
+                onClick={() => {
+                  setArchiveMenuOpen(false)
+                  setPrefilledChat(`Archive the ${config.name} strategy`)
+                  router.push(`/s/${strategyId}`)
+                }}
+                className="w-full text-left px-4 py-2.5 text-sm text-accent-red hover:bg-background/50 transition-colors"
+              >
+                Archive strategy
+              </button>
+            </div>
+          )}
+        </div>
         </div>
       </div>
 
@@ -1236,6 +1629,9 @@ export default function StrategyPage() {
             authFetch={authFetch}
             strategyId={strategyId}
             threadId={threadId}
+            strategies={strategies}
+            prefilledInput={prefilledChat}
+            onPrefilledConsumed={() => setPrefilledChat("")}
           />
         </div>
 
@@ -1282,21 +1678,50 @@ export default function StrategyPage() {
                   strategyAllocation={strategyAllocation}
                   maxRiskPct={maxRiskPct}
                   onOpenGuardrails={() => togglePanel("guardrails")}
+                  authFetch={authFetch}
                 />
               )}
               {panelSection === "agent" && (
                 <AgentContent state={state} fetchState={fetchState} authFetch={authFetch} />
               )}
+              {panelSection === "learnings" && (
+                <LearningsContent strategyDoc={strategyDoc} />
+              )}
+              {panelSection === "versions" && (
+                <VersionsContent strategyId={strategyId} authFetch={authFetch} />
+              )}
               {panelSection === "documents" && (
                 <DocumentsContent authFetch={authFetch} strategyId={strategyId} />
               )}
               {panelSection === "guardrails" && (
-                <StrategySettingsPanel
-                  embedded
-                  state={state}
-                  onStateRefresh={() => { fetchState(); fetchStrategySettings() }}
-                  strategy={strategyId}
-                />
+                <div>
+                  {strategyDoc && (
+                    <div className="px-4 pt-4 pb-2">
+                      <div className="bg-surface rounded-lg border border-border px-4 py-3 flex items-center justify-between">
+                        <div>
+                          <p className="text-xs text-text-muted uppercase tracking-wider mb-0.5">Autonomy</p>
+                          <p className="text-sm text-text-primary">
+                            {strategyDoc.autonomy === "autonomous" ? "Autonomous — no approval required" : "Approval required for trades"}
+                          </p>
+                        </div>
+                        <span className={[
+                          "text-[10px] font-mono px-1.5 py-0.5 rounded border",
+                          strategyDoc.autonomy === "autonomous"
+                            ? "text-accent-green border-accent-green/30 bg-accent-green/10"
+                            : "text-text-muted border-border",
+                        ].join(" ")}>
+                          {strategyDoc.autonomy === "autonomous" ? "autonomous" : "approval"}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  <StrategySettingsPanel
+                    embedded
+                    state={state}
+                    onStateRefresh={() => { fetchState(); fetchStrategySettings() }}
+                    strategy={strategyId}
+                  />
+                </div>
               )}
             </div>
           </div>

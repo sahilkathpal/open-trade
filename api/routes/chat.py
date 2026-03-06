@@ -18,45 +18,45 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="chat-agent")
 
 # ── HTTP endpoints ─────────────────────────────────────────────────────────────
 
-@router.get("/api/threads/{strategy}")
+@router.get("/api/threads/{context}")
 def list_strategy_threads(
-    strategy: str,
+    context: str,
     uid: Annotated[str, Depends(get_current_uid)],
 ):
     token, _ctx = _set_user_ctx_for_uid(uid)
     try:
         from agent.threads import list_threads
-        return list_threads(strategy)
+        return list_threads(context)
     finally:
         reset_user_ctx(token)
 
 
-@router.post("/api/threads/{strategy}")
+@router.post("/api/threads/{context}")
 def create_strategy_thread(
-    strategy: str,
+    context: str,
     uid: Annotated[str, Depends(get_current_uid)],
 ):
     token, _ctx = _set_user_ctx_for_uid(uid)
     try:
         from agent.threads import create_thread
-        return create_thread(strategy)
+        return create_thread(context)
     finally:
         reset_user_ctx(token)
 
 
-@router.get("/api/threads/{strategy}/{thread_id}/messages")
+@router.get("/api/threads/{context}/{thread_id}/messages")
 def get_thread_messages(
-    strategy: str,
+    context: str,
     thread_id: str,
     uid: Annotated[str, Depends(get_current_uid)],
 ):
     token, _ctx = _set_user_ctx_for_uid(uid)
     try:
         from agent.threads import get_thread_meta, get_messages
-        meta = get_thread_meta(strategy, thread_id)
+        meta = get_thread_meta(context, thread_id)
         if meta is None:
             raise HTTPException(status_code=404, detail="Thread not found")
-        messages = get_messages(strategy, thread_id)
+        messages = get_messages(context, thread_id)
         return {"id": thread_id, "status": meta.get("status", "idle"), "messages": messages}
     finally:
         reset_user_ctx(token)
@@ -64,7 +64,32 @@ def get_thread_messages(
 
 # ── WebSocket ──────────────────────────────────────────────────────────────────
 
-def _build_status_context(strategy: str) -> str:
+def _extract_mentioned_strategies(uid: str, message: str) -> list[dict]:
+    import re
+    from agent.firestore_strategies import get_strategy
+    mentions = re.findall(r'@([\w-]+)', message)
+    found = []
+    seen = set()
+    for m in mentions:
+        if m not in seen:
+            seen.add(m)
+            s = get_strategy(uid, m)
+            if s:
+                found.append(s)
+    return found
+
+def _build_mention_context(strategies: list[dict]) -> str:
+    parts = []
+    for s in strategies:
+        parts.append(
+            f"## @{s['id']} ({s['name']})\n"
+            f"**Thesis:** {s.get('thesis', 'none')}\n"
+            f"**Rules:** {s.get('rules', 'none')}"
+        )
+    return "\n\n".join(parts)
+
+
+def _build_status_context(context: str) -> str:
     """
     Build a current-state block for the system prompt.
     Reads only local files — no Dhan API calls.
@@ -164,8 +189,8 @@ def _build_status_context(strategy: str) -> str:
                 pass
 
         # ── Risk limits ───────────────────────────────────────────────────
-        allocation = ctx.strategy_allocations.get(strategy, 0)
-        guard = ctx.risk_by_strategy.get(strategy) or ctx.risk
+        allocation = ctx.strategy_allocations.get(context, 0)
+        guard = ctx.risk_by_strategy.get(context) or ctx.risk
         if allocation > 0:
             per_trade_limit = allocation * guard.max_risk_per_trade_pct / 100
             lines.append(
@@ -174,6 +199,14 @@ def _build_status_context(strategy: str) -> str:
             )
         else:
             lines.append(f"Risk limits: ₹{seed:,.0f} seed · no allocation set for this strategy — trades blocked")
+
+        # ── Strategy tagging hint ──────────────────────────────────────────
+        if context and context != "portfolio":
+            lines.append(
+                f"\nYou are currently working in strategy context: {context}. "
+                f"When calling place_trade, exit_position, write_trigger, write_schedule, or append_journal, "
+                f"always set strategy_id='{context}' unless the user explicitly says otherwise."
+            )
 
         return "\n".join(lines)
 
@@ -191,7 +224,7 @@ def _build_portfolio_context() -> str:
     from agent.user_context import get_user_ctx
 
     # Reuse the per-strategy context for shared sections
-    base = _build_status_context("portfolio")
+    base = _build_status_context("portfolio")  # portfolio is a valid context key
     lines = [base] if base else []
 
     try:
@@ -263,10 +296,10 @@ def _build_portfolio_context() -> str:
     return "\n".join(lines)
 
 
-@router.websocket("/ws/threads/{strategy}/{thread_id}")
+@router.websocket("/ws/threads/{context}/{thread_id}")
 async def chat_websocket(
     websocket: WebSocket,
-    strategy: str,
+    context: str,
     thread_id: str,
 ):
     await websocket.accept()
@@ -311,7 +344,7 @@ async def chat_websocket(
     try:
         from agent.threads import get_thread_meta, append_message, get_messages, set_status
 
-        meta = get_thread_meta(strategy, thread_id)
+        meta = get_thread_meta(context, thread_id)
         if meta is None:
             await websocket.send_json({"type": "error", "message": "Thread not found"})
             await websocket.close(code=4004)
@@ -331,21 +364,25 @@ async def chat_websocket(
                 continue
 
             # Save user message + mark thinking
-            append_message(strategy, thread_id, "user", content)
-            set_status(strategy, thread_id, "thinking")
+            append_message(context, thread_id, "user", content)
+            set_status(context, thread_id, "thinking")
 
             # Build history for runner (everything before the new message)
-            all_messages = get_messages(strategy, thread_id)
+            all_messages = get_messages(context, thread_id)
             history_for_runner = [
                 {"role": m["role"], "content": m["content"]}
                 for m in all_messages[:-1]
                 if m["role"] in ("user", "assistant")
             ]
 
-            if strategy == "portfolio":
+            # Parse @mentions and augment status context
+            mentioned = _extract_mentioned_strategies(uid, content)
+            if context == "portfolio":
                 status_context = _build_portfolio_context()
             else:
-                status_context = _build_status_context(strategy)
+                status_context = _build_status_context(context)
+            if mentioned:
+                status_context += "\n\n## Mentioned Strategies\n" + _build_mention_context(mentioned)
 
             # ── Permission coordination ────────────────────────────────────
             # Maps request_id -> (Event, result dict)
@@ -367,7 +404,7 @@ async def chat_websocket(
 
             def _run_in_thread(
                 uid_=uid,
-                strategy_=strategy,
+                context_=context,
                 content_=content,
                 history_=history_for_runner,
                 status_context_=status_context,
@@ -378,7 +415,7 @@ async def chat_websocket(
                     for event in run_chat_stream(
                         message=content_,
                         history=history_,
-                        strategy=strategy_,
+                        strategy=context_,
                         status_context=status_context_,
                         permission_callback=permission_callback,
                     ):
@@ -435,13 +472,13 @@ async def chat_websocket(
 
             full_response = "".join(response_parts)
             if full_response:
-                append_message(strategy, thread_id, "assistant", full_response)
-            set_status(strategy, thread_id, "idle")
+                append_message(context, thread_id, "assistant", full_response)
+            set_status(context, thread_id, "idle")
 
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        logger.error("WebSocket error in %s/%s: %s", strategy, thread_id, e)
+        logger.error("WebSocket error in %s/%s: %s", context, thread_id, e)
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
         except Exception:
@@ -450,6 +487,6 @@ async def chat_websocket(
         reset_user_ctx(ctx_token)
         try:
             from agent.threads import set_status
-            set_status(strategy, thread_id, "idle")
+            set_status(context, thread_id, "idle")
         except Exception:
             pass

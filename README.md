@@ -1,6 +1,6 @@
 # open-trade
 
-An autonomous AI trading agent for the Indian equity market (NSE cash, MIS intraday). Claude reasons about news, technicals, and fundamentals — places trades on [Dhan](https://dhan.co) — and notifies you over Telegram. A web UI gives you a live view of positions, proposals, and the agent's memory.
+An autonomous AI trading agent for the Indian equity market (NSE cash). Claude reasons about news, technicals, and fundamentals — places trades on [Dhan](https://dhan.co) — and notifies you over Telegram. A web UI gives you a live view of positions, proposals, and the agent's reasoning per strategy.
 
 No futures. No options.
 
@@ -14,100 +14,170 @@ A hosted version is running at **[app.govib.trade](https://app.govib.trade)**. S
 
 ## What makes it work
 
-**Claude is the trader, not the assistant.** It reads live data through tools, reasons abou
-t setups, sizes positions, sets stop-losses and targets, and writes its thinking to memory files it reads again the next day. Python handles all arithmetic — position sizing, P&L, stop distances — so there's no risk of the LLM hallucinating a number that matters.
+**Claude is the trader, not the assistant.** It reads live data through tools, reasons about setups, sizes positions, sets stop-losses and targets, and writes its thinking to memory it reads again the next day. Python handles all arithmetic — position sizing, P&L, stop distances — so there's no risk of the LLM hallucinating a number that matters.
+
+**Strategies are first-class.** Each strategy has its own thesis, rules, and learnings stored in Firestore. Capital, risk limits, and autonomy are configured per strategy. All positions and trades are scoped to the strategy that produced them.
+
+**Claude owns its own schedule.** There are no hardcoded job definitions. Claude writes its own recurring jobs via `write_schedule()` — specifying the cron, the prompt, and the reason. Schedules are separate from strategy rules and can be changed independently. They load into APScheduler on startup and persist across restarts.
 
 **Python enforces, Claude decides.** Every trade goes through `RiskGuard` before touching the broker API. The guard is hardcoded Python — the agent knows the rules but cannot change or bypass them.
 
-**The heartbeat is deterministic.** Position monitoring runs every minute in pure Python with no LLM involved. Claude is only woken up during the day when a condition it set fires. This keeps costs low and latency zero for the critical path (stop-loss exits, profit locks).
+**The heartbeat is deterministic.** Position monitoring runs every minute in pure Python with no LLM involved. Claude is only woken up when a condition it set fires. This keeps costs low and latency zero for the critical path (stop-loss exits, EOD hard exits).
 
 ---
 
 ## How it works
 
-Five jobs run each trading day:
+One infrastructure job runs all day. Everything else is Claude-owned:
 
 | Job | Time (IST) | What it does |
 |-----|-----------|--------------|
-| **Pre-market** | 8:45 AM | Reads news + charts, writes market canvas to `MARKET.md`, sets watchlist and wakeup conditions |
-| **Execution** | 9:35 AM | First candle closed — refines entry levels, proposes trades |
-| **Heartbeat** | Every 1 min (market hours) | Checks positions (SL / target / profit lock / EOD exit), evaluates wakeup conditions — pure Python, no LLM |
-| **Clear proposals** | 3:20 PM | Discards pending approvals before MIS auto-square-off |
-| **EOD** | 3:35 PM | Reviews the day, updates `JOURNAL.md` and `STRATEGY.md` |
+| **Heartbeat** | Every 1 min (market hours) | Checks positions (SL / target / EOD exit), evaluates triggers — pure Python, no LLM |
+| **Pre-market** | Claude-scheduled | Reads news + charts, identifies catalyst-driven candidates, sets EOD hard exit trigger |
+| **Execution** | Claude-scheduled | Opening range formed — evaluates entry checklist, places trades, sets monitoring triggers |
+| **EOD review** | Claude-scheduled | Reviews the day, journals trades, appends to strategy learnings |
+
+Pre-market, execution, and EOD jobs are written by Claude via `write_schedule()` when a strategy is first set up, and persist from there. View and remove them via `GET /api/schedules` or the Telegram `/schedule` command.
 
 ---
 
-## Wakeup conditions
+## Triggers
 
-Not everything can be decided at 8:45 AM. Markets move, setups evolve, and the right time to act on a thesis is often determined by what happens mid-session — a Nifty level breaking, a stock approaching its target, a news-driven spike.
+Not everything can be decided at pre-market. During setup and execution, Claude writes conditions via `write_trigger()`. The heartbeat evaluates them every minute in Python. When one fires, Claude is woken up with the current market context and its original reasoning.
 
-During pre-market and execution, Claude writes conditions to `TRIGGERS.json`. The heartbeat evaluates them in Python every minute. When one fires, Claude is woken up with the current market context and its original reasoning — so it can decide what to do with real data, not pre-market guesses.
+Hard triggers execute directly — no LLM. Soft triggers invoke Claude.
 
-Examples of conditions Claude can set:
+**Hard trigger examples:**
+- `at 15:10` with `action=exit_all` — deterministic EOD backstop exit, set each morning
+- `price_in_range` with `action=place_trade` — entry fires when stock enters the zone during the entry window
+
+**Soft trigger examples:**
 - `NIFTY50 crosses above 23,100` — re-evaluate the market view
-- `POWERGRID price drops below ₹302` — check if thesis is still intact
 - `open position P&L exceeds +2%` — consider locking gains or raising stop
 - `at 11:00 AM` — review how morning setups played out
 
-This is how Claude stays relevant through the session without being polled every minute.
+Supported types: `price_above`, `price_below`, `price_in_range`, `index_above`, `index_below`, `near_stop`, `near_target`, `position_pnl_pct`, `day_pnl_above`, `day_pnl_below`, `time`.
 
-Supported condition types: `price_above`, `price_below`, `index_above`, `index_below`, `near_stop`, `near_target`, `position_pnl_pct`, `day_pnl_above`, `day_pnl_below`, `time`.
+---
+
+## Strategies
+
+Each strategy is a Firestore document with its own isolated context:
+
+| Field | What it holds |
+|-------|--------------|
+| `thesis` | The investment hypothesis — why this edge exists |
+| `rules` | Trading logic only — entry criteria, exit conditions, sizing, risk limits, product type (MIS/CNC) |
+| `learnings` | Post-trade observations appended by Claude after EOD review |
+| `capital_allocation` | INR amount ring-fenced for this strategy |
+| `autonomy` | `approval` (default) or `autonomous` — controls Tier 2 approval gates per strategy |
+
+Schedules are not part of rules. A strategy with thesis and rules but no schedule will not run — Claude always sets up schedules in the same conversation where a strategy is created.
+
+Strategy proposals, thesis/rules updates, and archiving always require explicit user approval. Each update is version-snapshotted automatically so you can see the full history of how a strategy evolved.
 
 ---
 
 ## Guardrails
-
-### RiskGuard — the code gate
 
 Rules in `risk/guard.py`, enforced before every order. The agent cannot override them:
 
 | Rule | Value |
 |------|-------|
 | No entries before 9:30 AM | Enforced — first candle not yet closed |
-| Max position size | 40% of your configured agent capital |
-| Stop-loss range | 1.5–2.5% below entry (mandatory) |
-| Max open positions | Configurable (default: 2) |
+| Stop-loss required | Must be below entry price |
+| Max risk per trade | 2% of strategy allocation (configurable) |
 | Available funds check | Position value cannot exceed account balance |
-
-### Configurable limits
-
-| Setting | Default | What it controls |
-|---------|---------|-----------------|
-| Agent capital | ₹10,000 | Position sizing and risk calculations |
-| Daily loss limit | ₹500 | Agent halts new trades if day P&L drops below this |
-| Max open positions | 2 | Hard cap enforced by RiskGuard |
-| Profit lock | 4% | Heartbeat auto-exits if a position gains this much |
-
-These are defaults. Set them to match your account size in the Settings page.
+| Max open positions | Configurable (default: 2), enforced in `place_trade` |
+| Strategy allocation | Trades blocked if no capital is allocated to the strategy |
 
 ---
 
-## Memory and learning
+## Permission tiers
 
-The agent is stateful across sessions through files it reads and writes:
+| Tier | Tools | When approval required |
+|------|-------|----------------------|
+| 0 — read | Market data, positions, strategy reads | Never |
+| 1 — auto-write | Journal, learnings, soft triggers | Never |
+| 2 — conditional | place_trade, exit_position, update_thesis/rules, write_schedule | When not autonomous (global or per-strategy) |
+| 3 — always | propose_strategy, archive_strategy, set_strategy_allocation, set_strategy_autonomy | Always |
 
-| File | Purpose |
-|------|---------|
-| `SOUL.md` | Identity, values, and risk rules — written once by you |
-| `MARKET.md` | Today's macro canvas, sector thesis, open positions — rewritten each morning |
-| `STRATEGY.md` | Evolving edge — agent updates this at EOD based on what worked |
-| `JOURNAL.md` | Append-only trade log: thesis, entry, exit, P&L, lesson |
+Approval requests appear as inline cards in the chat. Telegram `approve` / `deny` commands work as a fallback.
+
+---
+
+## Memory
+
+The agent is stateful across sessions:
+
+| Store | Purpose |
+|-------|---------|
+| `SOUL.md` | Identity, values, and risk philosophy — shared across all users |
+| `HEARTBEAT.md` | Heartbeat logic reference — shared |
+| Strategy `thesis` | Investment hypothesis (Firestore) |
+| Strategy `rules` | Trading logic (Firestore) — versioned on every update |
+| Strategy `learnings` | Accumulated EOD observations (Firestore) |
+| `JOURNAL.md` | Append-only trade log per user |
+| `SCHEDULE.json` / Firestore | Claude-owned recurring jobs |
+| `TRIGGERS.json` | Active intraday conditions |
 
 ---
 
 ## Dual-mode control
 
-**Approval mode** (default): every trade proposal comes to Telegram for your approval. You reply `approve SYMBOL` or `deny SYMBOL`.
+**Approval mode** (default): every trade proposal appears as an inline card in the chat and a Telegram push. Approve or deny in either place. Proposals expire automatically before MIS square-off.
 
-**Autonomous mode**: orders go straight through RiskGuard to Dhan. Toggle this from the Settings page at any time.
+**Autonomous mode**: orders go straight through RiskGuard to Dhan. Toggle globally from Settings, or per-strategy by asking Claude in that strategy's chat.
+
+---
+
+## Push notifications
+
+Telegram receives a push for every meaningful event:
+
+| Event | Message |
+|-------|---------|
+| Trade proposal (approval mode) | Entry, SL, target, R:R, thesis summary |
+| Trade placed | Entry ₹X \| Qty N \| SL ₹X \| Target ₹X \| R:R |
+| Position exited | Exit price, P&L, reason |
+| SL hit | Condition that fired (heartbeat) |
+| Target hit | Condition that fired (heartbeat) |
+| Trigger fired | Condition context (heartbeat) |
+| Token expired | Once per day |
 
 ---
 
 ## Web UI
 
-The web dashboard shows live positions, P&L, pending proposals, watchlist, active wakeup conditions, and a real-time activity feed. All configuration lives in Settings — no `.env` editing required once it's running.
+| Page | What it shows |
+|------|--------------|
+| **Portfolio** | All strategies with lifetime P&L, live positions across strategies, activity feed |
+| **Strategy — Trades** | Open positions + completed trade journal with cumulative P&L |
+| **Strategy — Learnings** | Claude's accumulated observations for this strategy |
+| **Strategy — Versions** | Full history of thesis and rules changes with timestamps and labels |
+| **Strategy — Agent** | Activity feed of tool calls and job runs; token usage |
+| **Strategy — Documents** | Strategy memory files read-only |
+| **Strategy — Guardrails** | Capital allocation, risk limits, autonomy mode |
+| **Settings** | Broker credentials, seed capital, Telegram connection |
 
-Pages: **Dashboard**, **Market Brief** (today's MARKET.md), **Trade Journal** (JOURNAL.md), **Strategy** (STRATEGY.md), **Settings**.
+---
+
+## Telegram
+
+| Command | Effect |
+|---------|--------|
+| `/status` | Pending trade proposals |
+| `/positions` | Open positions with live P&L |
+| `/funds` | Account balance and day P&L |
+| `/triggers` | Active intraday conditions |
+| `/watchlist` | Entry candidates (hard triggers with `action=place_trade`) |
+| `/pause` / `/resume` | Pause or resume autonomous trading |
+| `/run premarket\|execution\|eod` | Manually trigger a scheduled job |
+| `/exit SYMBOL` | Emergency market exit |
+| `approve SYMBOL` | Approve and place a pending trade |
+| `deny SYMBOL` | Discard a pending proposal |
+
+Connect Telegram from the Settings page via a one-time deep link.
 
 ---
 
@@ -115,68 +185,45 @@ Pages: **Dashboard**, **Market Brief** (today's MARKET.md), **Trade Journal** (J
 
 ### Prerequisites
 
-- **Python 3.13** — required by `pandas-ta` / `numba`. Install via `brew install python@3.13`.
-- **Dhan account** — [dhan.co](https://dhan.co). Enable API access in the developer console. Access tokens expire every 24 hours and must be refreshed each morning in Settings.
-- **Anthropic API key** — [console.anthropic.com](https://console.anthropic.com). Paid tier recommended; free tier will hit rate limits on multi-tool jobs.
-- **Telegram bot** (optional) — create via [@BotFather](https://t.me/BotFather). Connect from the Settings page via QR code.
+- **Python 3.11+**
+- **Dhan account** — [dhan.co](https://dhan.co). Enable API access in the developer console. Access tokens expire every 24 hours.
+- **Anthropic API key** — [console.anthropic.com](https://console.anthropic.com). Paid tier recommended.
+- **Firebase project** — required for the web UI and multi-user mode. See below.
+- **Telegram bot** (optional) — create via [@BotFather](https://t.me/BotFather).
 
-### Setup
+### Firebase setup
+
+1. Create a project at [console.firebase.google.com](https://console.firebase.google.com)
+2. Enable **Authentication** → Email/Password
+3. Enable **Firestore** → Start in test mode, then apply the security rules from `docs/firestore-rules.md`
+4. Add a web app → copy the config into `web/.env.local`
+5. Generate a service account key → paste the JSON as `FIREBASE_SERVICE_ACCOUNT_KEY` in `.env`
+
+### Running
 
 ```bash
 git clone <repo-url>
 cd open-trade
 
-python3.13 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-cp .env.example .env
-# Set ANTHROPIC_API_KEY (and optionally TELEGRAM_BOT_TOKEN)
-```
-
-Minimal `.env`:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-TELEGRAM_BOT_TOKEN=          # optional
-```
-
-Broker credentials, seed capital, and risk limits are configured through the web UI Settings page.
-
-### Running
-
-```bash
-# API server + scheduler + Telegram bot
-source .venv/bin/activate
-uvicorn api.server:app --host 0.0.0.0 --port 8000
+# Install dependencies and start the backend
+uv sync
+uv run api
 
 # Web UI (separate terminal)
 cd web && npm run dev
 ```
 
-Keep the API process running all day via `screen`, `tmux`, or systemd.
+Sign up at `http://localhost:3000`, go to Settings, and save your Dhan credentials. That creates your Firestore user document and the agent is ready.
 
----
-
-## Telegram commands
-
-| Command | Effect |
-|---------|--------|
-| `/status` | Pending trade proposals |
-| `/positions` | Open positions with P&L |
-| `/funds` | Account balance |
-| `/watchlist` | Active watchlist entries |
-| `/triggers` | Active wakeup conditions |
-| `approve SYMBOL` | Approve and place a pending trade |
-| `deny SYMBOL` | Discard a pending proposal |
-| `/run premarket\|execution\|eod` | Trigger a job immediately |
-| `/exit SYMBOL` | Emergency exit a position |
-| `/pause` / `/resume` | Pause or resume autonomous trading |
+Keep the backend process running all day via `screen`, `tmux`, or systemd. The scheduler reloads from Firestore on startup so Claude-owned jobs are restored automatically.
 
 ---
 
 ## Known limitations
 
-- **Dhan access tokens expire every 24 hours.** Paste a fresh token in Settings each morning before the 8:45 AM pre-market job.
-- **NSE holidays.** The scheduler does not check the NSE holiday calendar. Jobs fire but the agent finds no actionable setups and exits cleanly.
-- **Single process.** Must stay running all day. Pending approvals survive restarts (persisted to disk); scheduler state resets.
+- **Dhan access tokens expire every 24 hours.** Paste a fresh token in Settings each morning before the pre-market job runs. The heartbeat detects expiry and sends a Telegram alert.
+- **Single process.** Must stay running all day. If it restarts mid-session, the scheduler reloads from Firestore but any in-flight agent reasoning is lost.
+- **MIS and CNC supported.** Intraday (MIS) positions are exited by the 15:10 hard trigger each day. CNC positions are monitored by the heartbeat but not force-exited.

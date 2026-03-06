@@ -20,7 +20,7 @@ import { useAuth } from "@/lib/auth"
 
 interface ThreadMeta {
   id: string
-  strategy: string
+  context: string
   title: string
   created_at: string
   status: "idle" | "thinking"
@@ -30,6 +30,8 @@ interface StrategyEntry {
   id: string
   name: string
   status: string
+  total_realized?: number
+  total_trades?: number
 }
 
 function relativeTime(iso: string): string {
@@ -324,6 +326,14 @@ export function Sidebar() {
                   <ChevronRight size={13} className="shrink-0 text-text-muted" />
                 )}
                 <span className="flex-1 truncate text-[13px]">{strategy.name}</span>
+                {strategy.total_realized != null && (
+                  <span className={[
+                    "text-[11px] font-mono shrink-0 ml-1",
+                    strategy.total_realized > 0 ? "text-accent-green" : strategy.total_realized < 0 ? "text-accent-red" : "text-text-muted",
+                  ].join(" ")}>
+                    {strategy.total_realized > 0 ? "+" : ""}{new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(strategy.total_realized)}
+                  </span>
+                )}
               </button>
 
               {isExpanded && (

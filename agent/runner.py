@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 
 from agent.tools import ALL_TOOL_SCHEMAS, execute_tool
+from agent.permissions import needs_approval
 from api import activity_log
 from api.token_usage import record as record_tokens
 
@@ -19,22 +20,6 @@ load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 MODEL = "claude-sonnet-4-6"
-
-
-import re as _re
-
-def _needs_permission(tool_name: str, inputs: dict) -> bool:
-    """Return True if this tool call requires user approval before execution."""
-    if tool_name == "write_memory":
-        # Gate any STRATEGY_{ID}.md file (the rules doc — two segments: STRATEGY + ID only).
-        # e.g. STRATEGY_INTRADAY.md, STRATEGY_DEFENCE.md — but NOT STRATEGY_INTRADAY_LEARNINGS.md
-        filename = inputs.get("filename", "")
-        if _re.match(r"^STRATEGY_[A-Z0-9]+\.md$", filename):
-            return True
-    if tool_name == "write_schedule":
-        return True
-    # write_trigger(hard) gate now lives inside write_trigger() itself
-    return False
 
 # ── Prompts for system-level job types ────────────────────────────────────────
 # Only trigger and catchup are system-owned. All scheduled jobs (premarket,
@@ -138,21 +123,39 @@ def run(job_type: str, extra_prompt: str = "", strategy_id: str = "") -> str:
 
     activity_log.emit({"type": "job_start", "summary": f"{job_type} started"})
 
-    # Build system prompt from SOUL.md + STRATEGY_{ID}.md (if strategy_id known)
-    # SOUL.md is shared; per-user files live in get_user_ctx().memory_dir
+    # Build system prompt from SOUL.md + strategy context (Firestore or file fallback)
+    # SOUL.md is shared; per-user data lives in Firestore or memory_dir
     soul_path = Path("memory/SOUL.md")
     soul = soul_path.read_text() if soul_path.exists() else "You are an autonomous trading agent."
 
     from agent.user_context import get_user_ctx
-    mem = get_user_ctx().memory_dir
+    ctx = get_user_ctx()
+    mem = ctx.memory_dir
 
-    # Load strategy-specific doc. Each strategy has its own STRATEGY_{ID}.md.
-    # Claude calls read_memory() for any additional files it needs.
+    # Load strategy-specific context. Try Firestore first, fall back to STRATEGY_{ID}.md.
     memory_parts = []
     if strategy_id:
-        specific_path = mem / f"STRATEGY_{strategy_id.upper()}.md"
-        if specific_path.exists():
-            memory_parts.append(f"## STRATEGY_{strategy_id.upper()}.md\n\n{specific_path.read_text()}")
+        try:
+            from agent.firestore_strategies import get_strategy as _fs_get_strategy
+            strat_doc = _fs_get_strategy(ctx.uid, strategy_id)
+            if strat_doc:
+                parts = []
+                if strat_doc.get("thesis"):
+                    parts.append(f"## Thesis\n\n{strat_doc['thesis']}")
+                if strat_doc.get("rules"):
+                    parts.append(f"## Rules\n\n{strat_doc['rules']}")
+                if strat_doc.get("learnings"):
+                    parts.append(f"## Learnings\n\n{strat_doc['learnings']}")
+                if parts:
+                    header = f"# Strategy: {strat_doc.get('name', strategy_id)}"
+                    memory_parts.append(header + "\n\n" + "\n\n".join(parts))
+        except Exception:
+            pass
+        # Fallback: file-backed strategy doc
+        if not memory_parts:
+            specific_path = mem / f"STRATEGY_{strategy_id.upper()}.md"
+            if specific_path.exists():
+                memory_parts.append(f"## STRATEGY_{strategy_id.upper()}.md\n\n{specific_path.read_text()}")
 
     memory_context = "\n\n---\n\n".join(memory_parts)
     system = f"{soul}\n\n---\n\n{memory_context}" if memory_context else soul
@@ -291,14 +294,24 @@ The user is talking to you through the open-trade web app. Here's what exists:
 
 **What Claude can do from this chat**
 - Answer questions about positions, P&L, market data, fundamentals
-- Read and update memory files (STRATEGY_{ID}.md, JOURNAL.md, LEARNINGS.md, and any other strategy-specific files) via read_memory/write_memory tools
+- Read memory files (JOURNAL.md, LEARNINGS.md, etc.) via read_memory
 - Place trades, exit positions (subject to RiskGuard limits and autonomous mode)
 - Run screens, fetch news, get quotes on any NSE EQ symbol
 - Create and manage recurring scheduled jobs (write_schedule, remove_schedule, list_schedules)
-- On first use: establish the user's trading strategy, write STRATEGY_{ID}.md (must specify order type —
-  MIS/INTRA for intraday/same-day exits, CNC for overnight or multi-day positions — plus entry
-  criteria, position sizing approach, volatility response, and concentration rules), then set up
-  a schedule with Claude-authored prompts for each job (premarket screening, execution, EOD review)
+- Create and update strategies via propose_strategy, update_strategy_thesis, update_strategy_rules
+
+**Strategy fields — keep strictly separated**
+- thesis: the investment hypothesis (why this edge exists)
+- rules: trading logic only — entry criteria, exit conditions, position sizing, risk limits, product
+  type (MIS/INTRA for intraday, CNC for overnight). Never include schedule or timing information here.
+- learnings: post-trade observations (append via update_strategy_learnings)
+- schedules: entirely separate — created with write_schedule(), never part of rules
+
+**Strategy creation is not complete until schedules are set up**
+A strategy with thesis+rules but no schedule will never run. In the same conversation where a
+strategy is created or rules are first established, always finish by calling write_schedule() for
+each recurring job (e.g. premarket scan, execution window, EOD review). Propose the schedule to
+the user and agree on the cron timing before calling the tool.
 
 **What Claude cannot do from chat**
 - Change Guardrails settings (user must use the Guardrails panel)
@@ -344,11 +357,16 @@ The user is talking to you through the open-trade web app. Here's what exists:
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
+                    from agent.user_context import get_user_ctx
+                    autonomous = get_user_ctx().autonomous
+
                     # Check if this tool needs user permission
-                    if permission_callback and _needs_permission(block.name, block.input):
+                    if permission_callback and needs_approval(block.name, block.input, autonomous, strategy_id=strategy):
                         request_id = str(uuid.uuid4())
+                        # strategy_proposal gets its own event type for inline card
+                        event_type = "strategy_proposal" if block.name == "propose_strategy" else "permission_request"
                         yield {
-                            "type": "permission_request",
+                            "type": event_type,
                             "id": request_id,
                             "tool": block.name,
                             "inputs": block.input,

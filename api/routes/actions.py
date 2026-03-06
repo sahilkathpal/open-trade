@@ -152,6 +152,44 @@ def respond_approval(
             result = write_trigger(id=trigger_id, approved=True, **params)
             activity_log.emit({"type": "tool_call", "tool": "write_trigger", "summary": f"Hard trigger approved: {trigger_id}"})
             return result
+        elif item_type == "strategy_proposal":
+            # Create the strategy in Firestore
+            strategy_id = item.get("proposal_strategy_id") or item.get("strategy_id", "")
+            if not strategy_id:
+                raise HTTPException(status_code=400, detail="strategy_proposal missing proposal_strategy_id")
+            from agent.firestore_strategies import create_strategy
+            from agent.firestore import update_user, is_enabled
+            doc = {
+                "name": item.get("name", strategy_id),
+                "thesis": item.get("thesis", ""),
+                "rules": item.get("rules", ""),
+                "capital_allocation": item.get("capital_allocation", 0.0),
+                "risk_config": item.get("risk_config", {}),
+                "status": "active",
+            }
+            ok = create_strategy(uid, strategy_id, doc)
+            # Also update strategy_allocations in the user doc if allocation is set
+            alloc = item.get("capital_allocation", 0.0)
+            if alloc > 0 and is_enabled() and uid != "default":
+                from agent.firestore import get_user
+                user_doc = get_user(uid) or {}
+                allocations = user_doc.get("strategy_allocations", {})
+                allocations[strategy_id] = alloc
+                update_user(uid, {"strategy_allocations": allocations})
+            activity_log.emit({
+                "type": "tool_call",
+                "tool": "propose_strategy",
+                "summary": f"Strategy created: {doc['name']}",
+            })
+            # Notify sidebar to reload
+            try:
+                activity_log.emit({"type": "strategies_updated", "summary": "New strategy created"})
+            except Exception:
+                pass
+            if ok:
+                return {"status": "created", "strategy_id": strategy_id, "name": doc["name"]}
+            else:
+                raise HTTPException(status_code=500, detail=f"Failed to create strategy '{strategy_id}' in Firestore")
         else:
             raise HTTPException(status_code=400, detail=f"Unknown approval type: {item_type}")
     finally:

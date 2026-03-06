@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from api.auth import get_current_uid
-from agent.tools import get_funds, get_positions, get_pending_approvals, load_triggers, _load_agent_pnl, get_approvals
+from agent.tools import get_funds, get_positions, load_triggers, _load_agent_pnl, get_approvals
 from agent.heartbeat import load_tracked_positions
 from agent.scheduler import _is_market_open, scheduler
 from api.token_usage import get_today as get_today_usage, get_all as get_all_usage
@@ -18,14 +18,42 @@ _scheduler_status = {
 }
 
 
+def _get_cumulative_pnl(uid: str) -> dict:
+    """Cumulative realized P&L from Firestore strategies, falling back to file."""
+    try:
+        from agent.firestore_strategies import list_strategies as _fs_list, get_strategy_pnl as _fs_pnl
+        from agent.firestore import is_enabled
+        if is_enabled() and uid != "default":
+            strategies = _fs_list(uid)
+            cumulative = 0.0
+            by_strategy: dict = {}
+            for s in strategies:
+                sid = s.get("id", "")
+                if not sid:
+                    continue
+                pnl = _fs_pnl(uid, sid)
+                realized = pnl.get("total_realized", 0.0)
+                cumulative += realized
+                by_strategy[sid] = realized
+            return {"cumulative_realized": cumulative, "strategy_cumulative_realized": by_strategy}
+    except Exception:
+        pass
+    p = _load_agent_pnl()
+    return {
+        "cumulative_realized": p.get("cumulative_realized", 0.0),
+        "strategy_cumulative_realized": p.get("strategy_cumulative_realized", {}),
+    }
+
+
 def _build_positions_and_agent_pnl() -> tuple[list[dict], dict]:
     """
     Build UI position objects and compute agent P&L in a single get_positions() call.
     Agent P&L uses Dhan's own realizedProfit / unrealizedProfit for tracked symbols.
+    Tracked positions are read from Firestore (with file fallback).
     """
     tracked = load_tracked_positions()
-    pnl_data = _load_agent_pnl()
-    tracked_symbols: set[str] = set(pnl_data.get("tracked_symbols", []))
+    # tracked_symbols: symbols the agent has positions in (for P&L computation)
+    tracked_symbols: set[str] = set(tracked.keys()) if tracked else set()
 
     _zero_pnl = {"realized": 0.0, "unrealized": 0.0, "total": 0.0}
 
@@ -200,10 +228,7 @@ def get_state(uid: Annotated[str, Depends(get_current_uid)]):
             "token_expired":     token_expired,
             "catchup_available": catchup_available,
             "agent_pnl":         agent_pnl,
-            **((lambda p: {
-                "cumulative_realized":          p.get("cumulative_realized", 0.0),
-                "strategy_cumulative_realized": p.get("strategy_cumulative_realized", {}),
-            })(_load_agent_pnl())),
+            **_get_cumulative_pnl(uid),
             "seed_capital":        ctx.risk.seed_capital,
             "autonomous":        ctx.autonomous,
             "paused":            ctx.paused,

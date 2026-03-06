@@ -182,8 +182,15 @@ class ScheduleManager:
             logger.debug("Schedule: remove_job %s not found: %s", job_id, e)
 
     def load_user_schedules(self, uid: str):
-        """Load all SCHEDULE.json entries for a user into APScheduler."""
-        entries = _load_schedule(uid)
+        """Load schedule entries for a user into APScheduler. Tries Firestore first, falls back to file."""
+        entries = []
+        try:
+            from agent.firestore_strategies import get_all_schedules
+            entries = get_all_schedules(uid)
+        except Exception:
+            pass
+        if not entries:
+            entries = _load_schedule(uid)
         for entry in entries:
             try:
                 self.add_job(uid, entry)
@@ -192,15 +199,34 @@ class ScheduleManager:
         logger.info("Schedule: loaded %d entries for uid=%s", len(entries), uid)
 
     def list_jobs(self, uid: str) -> list:
-        """Return active schedule entries for a user."""
+        """Return active schedule entries for a user. Tries Firestore first, falls back to file."""
+        try:
+            from agent.firestore_strategies import get_all_schedules
+            schedules = get_all_schedules(uid)
+            if schedules:
+                return schedules
+        except Exception:
+            pass
         return _load_schedule(uid)
 
 
 def _record_last_run(uid: str, entry_id: str):
-    """Write last_run timestamp into the matching SCHEDULE.json entry."""
+    """Write last_run timestamp into the matching schedule entry in Firestore and file."""
     from datetime import datetime, timezone
-    entries = _load_schedule(uid)
     now = datetime.now(timezone.utc).isoformat()
+    # Update Firestore — need strategy_id to locate the doc
+    try:
+        from agent.firestore_strategies import get_all_schedules, update_schedule_last_run
+        all_schedules = get_all_schedules(uid)
+        for entry in all_schedules:
+            if entry.get("id") == entry_id:
+                sid = entry.get("strategy_id", "untagged")
+                update_schedule_last_run(uid, sid, entry_id)
+                break
+    except Exception as e:
+        logger.debug("Failed to update schedule last_run in Firestore: %s", e)
+    # Update file fallback
+    entries = _load_schedule(uid)
     for entry in entries:
         if entry.get("id") == entry_id:
             entry["last_run"] = now

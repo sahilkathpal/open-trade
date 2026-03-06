@@ -425,7 +425,7 @@ export default function PortfolioPage() {
   const searchParams = useSearchParams()
   const threadId = searchParams.get("t")
   const [state, setState] = useState<AppState | null>(null)
-  const [strategies, setStrategies] = useState<{id: string; name: string; status: string}[]>([])
+  const [strategies, setStrategies] = useState<{id: string; name: string; status: string; total_realized?: number; total_trades?: number}[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [chatInput, setChatInput] = useState("")
   const [chatLoading, setChatLoading] = useState(false)
@@ -567,18 +567,18 @@ export default function PortfolioPage() {
                     {state ? (
                       <div className="flex items-center gap-5 text-xs font-mono">
                         <div>
-                          <span className="text-text-muted">P&L </span>
-                          <span className={agentPnl >= 0 ? "text-accent-green" : "text-accent-red"}>
-                            {agentPnl >= 0 ? "+" : ""}{formatINR(agentPnl)}
+                          <span className="text-text-muted">All-time </span>
+                          <span className={(strategy.total_realized ?? 0) >= 0 ? "text-accent-green" : "text-accent-red"}>
+                            {(strategy.total_realized ?? 0) >= 0 ? "+" : ""}{formatINR(strategy.total_realized ?? 0)}
                           </span>
+                        </div>
+                        <div>
+                          <span className="text-text-muted">Trades </span>
+                          <span className="text-text-primary">{strategy.total_trades ?? 0}</span>
                         </div>
                         <div>
                           <span className="text-text-muted">Positions </span>
                           <span className="text-text-primary">{positionCount}</span>
-                        </div>
-                        <div>
-                          <span className="text-text-muted">Triggers </span>
-                          <span className="text-text-primary">{triggerCount}</span>
                         </div>
                       </div>
                     ) : (

@@ -59,7 +59,7 @@ export interface AppState {
 
 export interface Approval {
   id: string
-  type: "trade" | "hard_trigger"
+  type: "trade" | "hard_trigger" | "strategy_proposal"
   created_at: string
   expires_at: string
   strategy_id: string
@@ -78,8 +78,53 @@ export interface Approval {
   trigger_type?: string
   action?: string
   reason?: string
+  // strategy_proposal fields
+  proposal_strategy_id?: string
+  name?: string
+  rules?: string
+  capital_allocation?: number
+  risk_config?: {
+    max_risk_per_trade_pct?: number
+    max_open_positions?: number
+  }
 }
 
+export interface Strategy {
+  id: string
+  name: string
+  status: "active" | "paused" | "archived"
+  capital_allocation?: number
+  risk_config?: {
+    max_risk_per_trade_pct?: number
+    max_open_positions?: number
+  }
+  thesis?: string
+  rules?: string
+  learnings?: string
+  created_at?: string
+  updated_at?: string
+  total_realized?: number
+  total_trades?: number
+}
+
+export interface StrategyProposalItem {
+  id: string
+  tool: string
+  inputs: {
+    id: string
+    name: string
+    thesis: string
+    rules: string
+    capital_allocation?: number
+    risk_config?: {
+      max_risk_per_trade_pct?: number
+      max_open_positions?: number
+    }
+  }
+  status: "pending" | "accepted" | "rejected"
+}
+
+// Kept for backward compatibility — used as a fallback display shape
 export interface StrategyConfig {
   id: string
   name: string
@@ -87,39 +132,3 @@ export interface StrategyConfig {
   goal: string
   subtitle: string
 }
-
-export const STRATEGY_CONFIGS: Record<string, StrategyConfig> = {
-  intraday: {
-    id: "intraday",
-    name: "Intraday Momentum",
-    live: true,
-    goal:
-      "Trade NSE large-cap stocks intraday using momentum strategies. Claude screens pre-market, sets price triggers, and executes entries — exiting all positions by 3:10 PM.",
-    subtitle: "NSE large-cap · MIS · exits by 3:10 PM",
-  },
-}
-
-export const COMING_SOON_STRATEGIES: StrategyConfig[] = [
-  {
-    id: "swing",
-    name: "Swing Trading",
-    live: false,
-    goal: "Hold positions for 2–5 days to capture medium-term momentum across NSE stocks.",
-    subtitle: "Multi-day positions · overnight risk management",
-  },
-  {
-    id: "longterm",
-    name: "Long Term Investing",
-    live: false,
-    goal:
-      "Build a portfolio of fundamentally strong stocks for multi-month holding periods, guided by qualitative research and news.",
-    subtitle: "Fundamental analysis · buy and hold",
-  },
-  {
-    id: "custom",
-    name: "Custom Strategy",
-    live: false,
-    goal: "Define your own trading thesis and let Claude build an execution framework around it.",
-    subtitle: "Bring your own logic",
-  },
-]

@@ -539,8 +539,7 @@ def place_trade(
     if isinstance(sl_resp, dict):
         sl_order_id = sl_resp.get("orderId") or sl_resp.get("data", {}).get("orderId")
 
-    open_positions = _load_open_positions()
-    open_positions[symbol] = {
+    position_data = {
         "security_id":     security_id,
         "entry_price":     entry_price,
         "stop_loss_price": stop_loss_price,
@@ -550,6 +549,14 @@ def place_trade(
         "product_type":    product_type,
         "strategy_id":     strategy_id,
     }
+    # Write to Firestore (primary) + local file (fallback / heartbeat compat)
+    try:
+        from agent.firestore_strategies import set_open_position
+        set_open_position(ctx.uid, strategy_id, symbol, position_data)
+    except Exception as e:
+        logger.warning("Failed to write open position to Firestore: %s", e)
+    open_positions = _load_open_positions()
+    open_positions[symbol] = position_data
     _save_open_positions(open_positions)
 
     # Push trade confirmation to Telegram
@@ -611,16 +618,37 @@ def exit_position(symbol: str, security_id: str, quantity: int, reason: str, rea
             except Exception:
                 pass
 
+        strategy_id = pos_data.get("strategy_id", "untagged")
+
         # Update cumulative realized P&L (portfolio-level and per-strategy)
         if realized_pnl != 0.0:
             pnl_data = _load_agent_pnl()
             pnl_data["cumulative_realized"] = pnl_data.get("cumulative_realized", 0.0) + realized_pnl
-            strategy_id = pos_data.get("strategy_id", "")
             if strategy_id:
                 sc = pnl_data.get("strategy_cumulative_realized", {})
                 sc[strategy_id] = sc.get(strategy_id, 0.0) + realized_pnl
                 pnl_data["strategy_cumulative_realized"] = sc
             _save_agent_pnl(pnl_data)
+
+        # Record in Firestore trades subcollection
+        try:
+            from agent.firestore_strategies import delete_open_position, record_trade
+            delete_open_position(ctx.uid, strategy_id, symbol)
+            trade_record = {
+                "symbol": symbol,
+                "security_id": security_id,
+                "entry_price": pos_data.get("entry_price", 0.0),
+                "exit_price": 0.0,  # will be updated from broker confirmation if available
+                "quantity": quantity,
+                "realized_pnl": realized_pnl,
+                "reason": reason,
+                "product_type": product_type,
+                "strategy_id": strategy_id,
+                "placed_at": pos_data.get("placed_at", ""),
+            }
+            record_trade(ctx.uid, strategy_id, trade_record)
+        except Exception as e:
+            logger.warning("Failed to record trade in Firestore: %s", e)
 
         open_positions.pop(symbol, None)
         _save_open_positions(open_positions)
@@ -853,8 +881,8 @@ def write_schedule(
     strategy_id: str = "",
 ) -> dict:
     """
-    Create or update a recurring scheduled job. Stored in memory/{uid}/SCHEDULE.json
-    and registered in APScheduler immediately.
+    Create or update a recurring scheduled job. Written to Firestore strategy subcollection
+    (primary) and memory/{uid}/SCHEDULE.json (fallback), then registered in APScheduler.
     """
     from agent.schedule_manager import get_schedule_manager, _load_schedule, _save_schedule
     ctx = get_user_ctx()
@@ -878,6 +906,15 @@ def write_schedule(
     if strategy_id:
         entry["strategy_id"] = strategy_id
 
+    # Write to Firestore (primary)
+    try:
+        from agent.firestore_strategies import set_strategy_schedule
+        sid = strategy_id or "untagged"
+        set_strategy_schedule(uid, sid, entry)
+    except Exception as e:
+        logger.warning("Failed to write schedule to Firestore: %s", e)
+
+    # Write to file (fallback / backward compat)
     entries = _load_schedule(uid)
     entries = [e for e in entries if e.get("id") != id]
     entries.append(entry)
@@ -896,6 +933,19 @@ def remove_schedule(id: str) -> dict:
     ctx = get_user_ctx()
     uid = ctx.uid
 
+    # Remove from Firestore (search all strategy subcollections)
+    try:
+        from agent.firestore_strategies import get_all_schedules, delete_strategy_schedule
+        all_schedules = get_all_schedules(uid)
+        for entry in all_schedules:
+            if entry.get("id") == id:
+                sid = entry.get("strategy_id", "untagged")
+                delete_strategy_schedule(uid, sid, id)
+                break
+    except Exception as e:
+        logger.warning("Failed to remove schedule from Firestore: %s", e)
+
+    # Remove from file
     entries = _load_schedule(uid)
     before = len(entries)
     entries = [e for e in entries if e.get("id") != id]
@@ -911,9 +961,19 @@ def remove_schedule(id: str) -> dict:
 
 def list_schedules() -> list:
     """Return all schedule entries for the current user."""
-    from agent.schedule_manager import _load_schedule
     ctx = get_user_ctx()
-    return _load_schedule(ctx.uid)
+    uid = ctx.uid
+    # Try Firestore first
+    try:
+        from agent.firestore_strategies import get_all_schedules
+        schedules = get_all_schedules(uid)
+        if schedules:
+            return schedules
+    except Exception:
+        pass
+    # Fallback to file
+    from agent.schedule_manager import _load_schedule
+    return _load_schedule(uid)
 
 
 def read_memory(filename: str) -> str:
@@ -1042,6 +1102,10 @@ def check_market_holiday(date: str | None = None) -> dict:
     return result
 
 
+# ── Strategy tools (Firestore-backed) ─────────────────────────────────────────
+from agent.tools.strategies import STRATEGY_TOOL_FUNCTIONS, STRATEGY_TOOL_SCHEMAS
+
+
 # ── tool executor ─────────────────────────────────────────────────────────────
 TOOL_FUNCTIONS = {
     "get_market_quote":      get_market_quote,
@@ -1065,6 +1129,8 @@ TOOL_FUNCTIONS = {
     "register_strategy":          register_strategy,
     "list_registered_strategies": list_registered_strategies,
     "check_market_holiday":       check_market_holiday,
+    # Strategy tools (Firestore-backed)
+    **STRATEGY_TOOL_FUNCTIONS,
 }
 
 
@@ -1076,6 +1142,7 @@ def execute_tool(name: str, inputs: dict):
 
 
 # ── Anthropic tool schemas ────────────────────────────────────────────────────
+# New strategy tools are appended after the existing schemas.
 ALL_TOOL_SCHEMAS = [
     {
         "name": "get_market_quote",
@@ -1427,4 +1494,6 @@ ALL_TOOL_SCHEMAS = [
             "required": [],
         },
     },
+    # Strategy tools (Firestore-backed — appended from agent.tools.strategies)
+    *STRATEGY_TOOL_SCHEMAS,
 ]

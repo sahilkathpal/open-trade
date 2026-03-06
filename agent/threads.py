@@ -1,12 +1,12 @@
 """
-Per-user, per-strategy thread storage.
+Per-user, per-context thread storage.
 
 JSONL format — one JSON line per message, append-only.
 Metadata in a separate .meta.json file for fast listing.
 
 Layout:
-  memory/{uid}/threads/{strategy}/{threadId}.jsonl
-  memory/{uid}/threads/{strategy}/{threadId}.meta.json
+  memory/{uid}/threads/{context}/{threadId}.jsonl
+  memory/{uid}/threads/{context}/{threadId}.meta.json
 """
 import json
 import uuid
@@ -16,33 +16,33 @@ from pathlib import Path
 import pytz
 
 
-def _threads_dir(strategy: str) -> Path:
+def _threads_dir(context: str) -> Path:
     from agent.user_context import get_user_ctx
     mem = get_user_ctx().memory_dir
-    d = mem / "threads" / strategy
+    d = mem / "threads" / context
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def create_thread(strategy: str) -> dict:
+def create_thread(context: str) -> dict:
     """Create a new empty thread. Returns metadata dict."""
     thread_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     meta = {
         "id": thread_id,
-        "strategy": strategy,
+        "context": context,
         "title": "New thread",
         "created_at": now,
         "status": "idle",
     }
-    d = _threads_dir(strategy)
+    d = _threads_dir(context)
     (d / f"{thread_id}.jsonl").touch()
     (d / f"{thread_id}.meta.json").write_text(json.dumps(meta), encoding="utf-8")
     return meta
 
 
-def get_thread_meta(strategy: str, thread_id: str) -> dict | None:
-    d = _threads_dir(strategy)
+def get_thread_meta(context: str, thread_id: str) -> dict | None:
+    d = _threads_dir(context)
     meta_path = d / f"{thread_id}.meta.json"
     if not meta_path.exists():
         return None
@@ -52,9 +52,9 @@ def get_thread_meta(strategy: str, thread_id: str) -> dict | None:
         return None
 
 
-def list_threads(strategy: str) -> list[dict]:
-    """List all threads for a strategy, sorted by created_at descending."""
-    d = _threads_dir(strategy)
+def list_threads(context: str) -> list[dict]:
+    """List all threads for a context, sorted by created_at descending."""
+    d = _threads_dir(context)
     metas = []
     for f in d.glob("*.meta.json"):
         try:
@@ -64,16 +64,16 @@ def list_threads(strategy: str) -> list[dict]:
     return sorted(metas, key=lambda m: m.get("created_at", ""), reverse=True)
 
 
-def append_message(strategy: str, thread_id: str, role: str, content: str):
+def append_message(context: str, thread_id: str, role: str, content: str):
     """Append one message to the thread's JSONL file."""
     now = datetime.now(pytz.timezone("Asia/Kolkata")).isoformat()
     line = json.dumps({"role": role, "content": content, "ts": now})
-    d = _threads_dir(strategy)
+    d = _threads_dir(context)
     with open(d / f"{thread_id}.jsonl", "a", encoding="utf-8") as f:
         f.write(line + "\n")
     # Update title from first user message
     if role == "user":
-        meta = get_thread_meta(strategy, thread_id)
+        meta = get_thread_meta(context, thread_id)
         if meta and meta.get("title") == "New thread":
             title = content[:60].replace("\n", " ")
             meta["title"] = title
@@ -82,9 +82,9 @@ def append_message(strategy: str, thread_id: str, role: str, content: str):
             )
 
 
-def get_messages(strategy: str, thread_id: str) -> list[dict]:
+def get_messages(context: str, thread_id: str) -> list[dict]:
     """Read all messages from the thread's JSONL file."""
-    d = _threads_dir(strategy)
+    d = _threads_dir(context)
     path = d / f"{thread_id}.jsonl"
     if not path.exists():
         return []
@@ -100,9 +100,9 @@ def get_messages(strategy: str, thread_id: str) -> list[dict]:
     return messages
 
 
-def set_status(strategy: str, thread_id: str, status: str):
+def set_status(context: str, thread_id: str, status: str):
     """Update the status field in the thread's metadata."""
-    d = _threads_dir(strategy)
+    d = _threads_dir(context)
     meta_path = d / f"{thread_id}.meta.json"
     if not meta_path.exists():
         return

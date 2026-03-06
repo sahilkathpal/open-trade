@@ -30,8 +30,18 @@ logger = logging.getLogger(__name__)
 
 
 def load_tracked_positions() -> dict:
-    """Load locally tracked position metadata (entry, SL, target)."""
-    path = get_user_ctx().memory_dir / "OPEN_POSITIONS.json"
+    """Load tracked position metadata. Tries Firestore first, falls back to file."""
+    ctx = get_user_ctx()
+    # Try Firestore first
+    try:
+        from agent.firestore_strategies import get_open_positions
+        fs_positions = get_open_positions(ctx.uid)
+        if fs_positions:
+            return fs_positions  # already keyed by symbol
+    except Exception:
+        pass
+    # Fallback: local file
+    path = ctx.memory_dir / "OPEN_POSITIONS.json"
     if path.exists():
         try:
             return json.loads(path.read_text())
